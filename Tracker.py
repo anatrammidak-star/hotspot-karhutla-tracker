@@ -1316,17 +1316,24 @@ def download_excel():
         return send_file(out_file, as_attachment=True, download_name=out_file)
     return "File Excel belum tersedia", 404
 
+# ==========================================
+# 9. INISIALISASI OTOMATIS (LOKAL & SERVER CLOUD)
+# ==========================================
+# Jalankan inisialisasi database dan seed data secara langsung agar Gunicorn mengeksekusinya
+init_db()
+seed_historical_multi()
 
-# ==========================================
-# 9. PELUNCUR UTAMA
-# ==========================================
-if __name__ == "__main__":
-    init_db()
-    seed_historical_multi()
-    t = threading.Thread(target=run_scheduler, daemon=True)
-    t.start()
+# Jalankan background scheduler untuk penarikan 07:00 & 18:00 WIB
+t = threading.Thread(target=run_scheduler, daemon=True)
+t.start()
+
+try:
     initial_date, _ = get_effective_date_and_session()
     export_to_excel_multi(initial_date.strftime("%Y-%m-%d"))
+except Exception:
+    pass
 
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
