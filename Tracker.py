@@ -97,7 +97,7 @@ def set_nasa_key(new_key):
 
 
 # ==========================================
-# 2. OVERLAY KAWASAN SPESIFIK 3 PROVINSI
+# 2. OVERLAY KAWASAN SPESIFIK 3 PROVINSI (UPDATED)
 # ==========================================
 def overlay_kawasan_multi(df_points):
     gdf = gpd.GeoDataFrame(
@@ -110,15 +110,20 @@ def overlay_kawasan_multi(df_points):
         prov = row["provinsi"]
         lat, lon = row["latitude"], row["longitude"]
 
-        # ---------------- JAMBI ----------------
+        # =========================================================
+        # 1. PROVINSI JAMBI
+        # =========================================================
         if prov == "JAMBI":
-            if lon <= 101.90 and lat <= -1.50:
+            # TN Kerinci Seblat (TNKS) - Bagian Barat Jambi
+            if lon <= 101.90 and lat <= -1.40:
                 return pd.Series([
                     "KPA (Taman Nasional)",
                     "TN Kerinci Seblat (TNKS)",
                     0,
                     "Kerinci / Merangin",
                 ])
+
+            # TN Bukit Tigapuluh (TNBT)
             elif 102.30 <= lon <= 102.85 and -1.40 <= lat <= -0.90:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -126,6 +131,8 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Tebo / Tanjab Barat",
                 ])
+
+            # TN Bukit Duabelas (TNBD)
             elif 102.50 <= lon <= 102.85 and -2.05 <= lat <= -1.75:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -133,31 +140,53 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Sarolangun / Batanghari",
                 ])
-            elif lon >= 104.00 and -1.55 <= lat <= -1.15:
+
+            # TN Berbak (TNB) - Rawa Gambut Pesisir
+            elif lon >= 104.00 and -1.60 <= lat <= -1.15:
                 return pd.Series([
                     "KPA (Taman Nasional)",
                     "TN Berbak (TNB)",
                     1,
                     "Tanjung Jabung Timur",
                 ])
-            elif 103.00 <= lon <= 103.35 and -1.25 <= lat <= -0.90:
+
+            # CA / KSA Gambut Bram Itam & Sungai Bakau
+            elif 103.00 <= lon <= 103.45 and -1.25 <= lat <= -0.90:
                 return pd.Series([
-                    "Hutan Lindung (HL)",
-                    "HL Gambut Bram Itam",
+                    "Hutan Lindung (HL) / KSA",
+                    "HLG Bram Itam & CA Hutan Bakau Pantai",
                     1,
                     "Tanjung Jabung Barat",
                 ])
+
+            # PBPH PT REKI (Hutan Harapan) - Lanskap Jambi-Sumsel sisi Jambi
             elif 103.15 <= lon <= 103.55 and -2.40 <= lat <= -2.00:
                 return pd.Series([
                     "PBPH (Restorasi Ekosistem)",
-                    "PBPH PT REKI (Hutan Harapan)",
+                    "PBPH PT REKI (Hutan Harapan Jambi)",
                     0,
                     "Batanghari / Sarolangun",
                 ])
-            elif 103.35 <= lon <= 103.75 and -1.60 <= lat <= -1.20:
-                return pd.Series(
-                    ["PBPH (Hutan Tanaman)", "PBPH PT WKS", 1, "Muaro Jambi"]
-                )
+
+            # PBPH PT WKS (Grup Sinarmas HTI Gambut & Mineral)
+            elif 103.35 <= lon <= 103.85 and -1.65 <= lat <= -1.15:
+                return pd.Series([
+                    "PBPH (Hutan Tanaman)",
+                    "PBPH PT Wirakarya Sakti (WKS)",
+                    1,
+                    "Muaro Jambi / Tanjabbar",
+                ])
+
+            # Tahura Orang Kayo Hitam (Muaro Jambi / Tanjabtim)
+            elif 103.80 <= lon <= 104.05 and -1.65 <= lat <= -1.40:
+                return pd.Series([
+                    "KPA (Tahura)",
+                    "Tahura Orang Kayo Hitam",
+                    1,
+                    "Muaro Jambi",
+                ])
+
+            # APL (Area Penggunaan Lain)
             else:
                 is_g = 1 if (lon >= 103.50 and lat >= -1.70) else 0
                 g_str = "Gambut" if is_g == 1 else "Mineral"
@@ -175,17 +204,29 @@ def overlay_kawasan_multi(df_points):
                     kab,
                 ])
 
-        # ------------ SUMATERA SELATAN ------------
+        # =========================================================
+        # 2. PROVINSI SUMATERA SELATAN
+        # =========================================================
         elif prov == "SUMSEL":
-            # TN Sembilang / Lanskap Pesisir Banyuasin
-            if 104.40 <= lon <= 105.10 and -2.40 <= lat <= -1.70:
+            # TN Kerinci Seblat (TNKS Wilayah Sumsel: Musi Rawas / Muratara / Lahat)
+            if lon <= 103.15 and -3.40 <= lat <= -2.30:
+                return pd.Series([
+                    "KPA (Taman Nasional)",
+                    "TN Kerinci Seblat (TNKS Sumsel)",
+                    0,
+                    "Musi Rawas / Muratara",
+                ])
+
+            # TN Sembilang (KPA Pesisir Rawa Gambut & Mangrove Banyuasin)
+            elif 104.35 <= lon <= 105.10 and -2.45 <= lat <= -1.70:
                 return pd.Series([
                     "KPA (Taman Nasional)",
                     "TN Sembilang",
                     1,
                     "Banyuasin",
                 ])
-            # SM Padang Sugihan (Gambut OKI / Banyuasin)
+
+            # SM Padang Sugihan (KSA Gambut OKI & Banyuasin)
             elif 104.80 <= lon <= 105.35 and -3.20 <= lat <= -2.60:
                 return pd.Series([
                     "KSA (Suaka Margasatwa)",
@@ -193,15 +234,71 @@ def overlay_kawasan_multi(df_points):
                     1,
                     "Ogan Komering Ilir",
                 ])
-            # PBPH Gambut OKI (Kawasan Hutan Produksi Tanaman Industri)
-            elif lon >= 105.20 and -3.60 <= lat <= -2.80:
+
+            # SM Dangku (KSA Hutan Dataran Rendah Musi Banyuasin)
+            elif 103.65 <= lon <= 104.15 and -2.65 <= lat <= -2.25:
+                return pd.Series([
+                    "KSA (Suaka Margasatwa)",
+                    "SM Dangku",
+                    0,
+                    "Musi Banyuasin",
+                ])
+
+            # SM Bentayan (Banyuasin)
+            elif 103.95 <= lon <= 104.35 and -2.35 <= lat <= -2.00:
+                return pd.Series([
+                    "KSA (Suaka Margasatwa)",
+                    "SM Bentayan",
+                    0,
+                    "Banyuasin",
+                ])
+
+            # SM Isau-Isau / SM Gumai Pasemah / HL Bukit Dingin (KSA/HL Pegunungan)
+            elif lon <= 103.70 and lat <= -3.70:
+                return pd.Series([
+                    "KSA / Hutan Lindung",
+                    "SM Isau-Isau / HL Bukit Dingin",
+                    0,
+                    "Lahat / Empat Lawang / Muara Enim",
+                ])
+
+            # Tahura K.G.P.A.A. Mangkunegara (Musi Banyuasin)
+            elif 103.75 <= lon <= 104.05 and -2.30 <= lat <= -2.05:
+                return pd.Series([
+                    "KPA (Tahura)",
+                    "Tahura K.G.P.A.A. Mangkunegara",
+                    0,
+                    "Musi Banyuasin",
+                ])
+
+            # TWA Danau Ranau (OKU Selatan)
+            elif 103.80 <= lon <= 104.10 and lat <= -4.80:
+                return pd.Series([
+                    "KPA (TWA)",
+                    "TWA Danau Ranau",
+                    0,
+                    "Ogan Komering Ulu Selatan",
+                ])
+
+            # PBPH PT REKI (Hutan Harapan sisi Sumsel / Lanskap Trans-Boundary)
+            elif 103.20 <= lon <= 103.60 and -2.60 <= lat <= -2.35:
+                return pd.Series([
+                    "PBPH (Restorasi Ekosistem)",
+                    "PBPH PT REKI (Hutan Harapan Sumsel)",
+                    0,
+                    "Musi Banyuasin",
+                ])
+
+            # PBPH HTI Gambut Pesisir Timur OKI (Grup SBA Wood / BMH / dkk.)
+            elif lon >= 105.15 and -3.75 <= lat <= -2.75:
                 return pd.Series([
                     "PBPH (Hutan Tanaman)",
-                    "PBPH HTI Gambut OKI",
+                    "PBPH HTI Gambut OKI (PT SBA/BMH/TPJ)",
                     1,
                     "Ogan Komering Ilir",
                 ])
-            # PBPH Musi Banyuasin (MUBA)
+
+            # PBPH Musi Banyuasin (Hutan Produksi Mineral)
             elif 103.40 <= lon <= 104.30 and -2.90 <= lat <= -2.10:
                 return pd.Series([
                     "PBPH (Hutan Produksi)",
@@ -209,14 +306,8 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Musi Banyuasin",
                 ])
-            # Hutan Lindung Bukit Balai Rejang / Lahat / Muara Enim
-            elif lon <= 103.60 and lat <= -3.60:
-                return pd.Series([
-                    "Hutan Lindung (HL)",
-                    "HL Bukit Balai Rejang",
-                    0,
-                    "Lahat / Muara Enim",
-                ])
+
+            # APL (Area Penggunaan Lain - Perkebunan Sawit/Karet & Lahan Masyarakat)
             else:
                 is_g = 1 if lon >= 104.70 else 0
                 g_str = "Gambut" if is_g == 1 else "Mineral"
@@ -227,38 +318,43 @@ def overlay_kawasan_multi(df_points):
                 )
                 return pd.Series([
                     f"APL (Lahan {g_str})",
-                    "Areal Perkebunan Sawit/Karet",
+                    "Areal Perkebunan / Lahan Budidaya",
                     is_g,
                     kab,
                 ])
 
-        # -------------- JAWA TIMUR --------------
+        # =========================================================
+        # 3. PROVINSI JAWA TIMUR (SELURUHNYA NON-GAMBUT / MINERAL)
+        # =========================================================
         elif prov == "JATIM":
-            # TN Bromo Tengger Semeru (TNBTS)
-            if 112.80 <= lon <= 113.15 and -8.15 <= lat <= -7.85:
+            # TN Bromo Tengger Semeru (TNBTS - KPA Pegunungan)
+            if 112.80 <= lon <= 113.15 and -8.20 <= lat <= -7.85:
                 return pd.Series([
                     "KPA (Taman Nasional)",
                     "TN Bromo Tengger Semeru (TNBTS)",
                     0,
-                    "Malang / Probolinggo / Pasuruan",
+                    "Malang / Probolinggo / Pasuruan / Lumajang",
                 ])
-            # TN Baluran (Savana & Hutan Musim Situbondo)
-            elif 114.25 <= lon <= 114.55 and -7.90 <= lat <= -7.70:
+
+            # TN Baluran (KPA Savana & Hutan Musim)
+            elif 114.25 <= lon <= 114.55 and -7.95 <= lat <= -7.70:
                 return pd.Series([
                     "KPA (Taman Nasional)",
                     "TN Baluran",
                     0,
                     "Situbondo",
                 ])
-            # TN Meru Betiri (Jember / Banyuwangi)
-            elif 113.60 <= lon <= 114.00 and -8.60 <= lat <= -8.30:
+
+            # TN Meru Betiri (KPA Pesisir Selatan Jember-Banyuwangi)
+            elif 113.60 <= lon <= 114.05 and -8.65 <= lat <= -8.30:
                 return pd.Series([
                     "KPA (Taman Nasional)",
                     "TN Meru Betiri",
                     0,
                     "Jember / Banyuwangi",
                 ])
-            # TN Alas Purwo (Ujung Timur Banyuwangi)
+
+            # TN Alas Purwo (KPA Semenanjung Blambangan)
             elif lon >= 114.30 and -8.80 <= lat <= -8.50:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -266,36 +362,79 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Banyuwangi",
                 ])
-            # Tahura Raden Soerjo (Mojokerto / Batu / Pasuruan)
-            elif 112.45 <= lon <= 112.70 and -7.80 <= lat <= -7.65:
+
+            # Tahura Raden Soerjo (KPA Lereng Arjuno-Welirang)
+            elif 112.45 <= lon <= 112.75 and -7.85 <= lat <= -7.60:
                 return pd.Series([
                     "KPA (Tahura)",
                     "Tahura Raden Soerjo",
                     0,
-                    "Mojokerto / Batu",
+                    "Mojokerto / Batu / Pasuruan / Malang",
                 ])
-            # KPH Perhutani (Hutan Produksi Jati / Pinus Jawa Timur)
+
+            # SM Dataran Tinggi Yang / Gn. Argopuro (KSA)
+            elif 113.45 <= lon <= 113.75 and -8.05 <= lat <= -7.85:
+                return pd.Series([
+                    "KSA (Suaka Margasatwa)",
+                    "SM Dataran Tinggi Yang (Argopuro)",
+                    0,
+                    "Probolinggo / Jember / Bondowoso",
+                ])
+
+            # CA / TWA Kawah Ijen (KSA/KPA)
+            elif 114.15 <= lon <= 114.35 and -8.15 <= lat <= -7.95:
+                return pd.Series([
+                    "KPA (TWA) / CA",
+                    "TWA Kawah Ijen & CA Merapi Ungup-Ungup",
+                    0,
+                    "Banyuwangi / Bondowoso",
+                ])
+
+            # CA Pulau Sempu (KSA Pesisir Malang Selatan)
+            elif 112.65 <= lon <= 112.75 and -8.48 <= lat <= -8.42:
+                return pd.Series([
+                    "KSA (Cagar Alam)",
+                    "CA Pulau Sempu",
+                    0,
+                    "Malang",
+                ])
+
+            # KPH Perum Perhutani (Divre Jawa Timur: Hutan Jati & Pinus)
             elif (
-                (111.40 <= lon <= 112.20 and -7.60 <= lat <= -7.10)
-                or (111.80 <= lon <= 112.50 and -8.20 <= lat <= -7.80)
+                (111.35 <= lon <= 112.25 and -7.65 <= lat <= -7.05)
+                or (111.70 <= lon <= 112.50 and -8.25 <= lat <= -7.75)
+                or (113.80 <= lon <= 114.35 and -8.40 <= lat <= -7.80)
             ):
                 kab = (
-                    "Bojonegoro / Ngawi" if lat > -7.5 else "Ponorogo / Trenggalek"
+                    "Bojonegoro / Ngawi / Tuban"
+                    if lat > -7.5
+                    else (
+                        "Madiun / Ponorogo / Trenggalek"
+                        if lon < 112.5
+                        else "Bondowoso / Banyuwangi"
+                    )
                 )
-                return pd.Series(
-                    ["KPH Perhutani", "Hutan Produksi Perhutani Divre Jatim", 0, kab]
-                )
+                return pd.Series([
+                    "KPH Perhutani (HP/HL)",
+                    "Hutan Produksi/Lindung Perum Perhutani",
+                    0,
+                    kab,
+                ])
+
+            # APL (Lahan Mineral: Sawah, Tegalan, Perkebunan, Pemukiman)
             else:
                 kab = (
                     "Madiun / Magetan"
                     if lon < 111.8
                     else (
-                        "Jombang / Mojokerto" if lon < 112.6 else "Banyuwangi"
+                        "Kediri / Blitar / Malang"
+                        if lon < 112.8
+                        else "Probolinggo / Lumajang / Jember"
                     )
                 )
                 return pd.Series([
                     "APL (Lahan Mineral)",
-                    "Tegalan / Pertanian / Pemukiman",
+                    "Areal Pertanian / Tegalan / Perkebunan Rakyat",
                     0,
                     kab,
                 ])
@@ -306,7 +445,6 @@ def overlay_kawasan_multi(df_points):
         gdf.apply(classify_row, axis=1)
     )
     return gdf
-
 
 # ==========================================
 # 3. SPATIAL CLUSTERING (~500 meter per Provinsi)
