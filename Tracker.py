@@ -27,6 +27,7 @@ PROVINSI_BBOX = {
     "KALTIM": "113.80,-2.45,119.05,2.85",
 }
 
+# 15 Titik Sentinel Acuan Peringatan Dini H-5 di Kawasan Kritis
 SENTINEL_POINTS = [
     # Jambi
     {
@@ -119,7 +120,7 @@ SENTINEL_POINTS = [
     # Kalimantan Timur
     {
         "prov": "KALTIM",
-        "kawasan": "Tahura Bukit Soeharto / IKN",
+        "kawasan": "Tahura Bukit Soeharto / Delineasi IKN",
         "lat": -0.980,
         "lon": 117.020,
         "gambut": 0,
@@ -133,7 +134,7 @@ SENTINEL_POINTS = [
     },
     {
         "prov": "KALTIM",
-        "kawasan": "Konsesi Tambang/HTI Kutai Kartanegara",
+        "kawasan": "Konsesi HTI / Tambang Kutai Kartanegara",
         "lat": -0.450,
         "lon": 116.850,
         "gambut": 0,
@@ -580,7 +581,7 @@ def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
 
 
 # ==========================================
-# 4. KONEKTOR PENARIKAN DATA NASA & CUACA
+# 4. KONEKTOR PENARIKAN DATA NASA & CUACA H-5
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
@@ -627,6 +628,7 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
 
 
 def update_fire_risk_forecast_multi():
+    """Mengambil data 5 hari ke depan dan menganalisis 3 elemen pembakar."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
@@ -649,14 +651,20 @@ def update_fire_risk_forecast_multi():
 
                 for i in range(len(times)):
                     fc_date = times[i]
-                    tm = t_max[i] if i < len(t_max) else 32.0
-                    rm = rh_min[i] if i < len(rh_min) else 60.0
+                    tm = t_max[i] if i < len(t_max) else 33.0
+                    rm = rh_min[i] if i < len(rh_min) else 55.0
                     pr = precip[i] if i < len(precip) else 0.0
-                    wn = wind[i] if i < len(wind) else 10.0
+                    wn = wind[i] if i < len(wind) else 12.0
 
+                    # 3 ELEMEN PEMBAKAR:
+                    # 1. Panas (Suhu Udara Puncak Siang Hari)
                     temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
+                    # 2. Desikasi / Oksigen (Kelembapan Rendah + Angin Kencang)
                     rh_score = min(max((75.0 - rm) * 1.2, 0), 30)
+                    # 3. Ketersediaan Bahan Bakar Kering (Defisit Curah Hujan)
                     dry_score = 25 if pr < 1.0 else (10 if pr < 5.0 else 0)
+
+                    # Pengali tipe bahan bakar (Gambut vs Mineral)
                     peat_multiplier = 1.25 if item["gambut"] == 1 else 1.05
 
                     raw_score = (
@@ -778,15 +786,25 @@ def sync_hotspots_multi(target_date_str):
 
 
 # ==========================================
-# 5. SEED DATA HISTORIS (5 PROVINSI)
+# 5. SEED DATA DENGAN SISTEM AUTO-MIGRATION
 # ==========================================
 def seed_historical_multi():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM hotspot_clusters")
-    count = c.fetchone()[0]
 
-    if count == 0:
+    # Periksa apakah Kalimantan Tengah sudah ada
+    c.execute(
+        "SELECT COUNT(*) FROM hotspot_clusters WHERE provinsi = 'KALTENG'"
+    )
+    has_kalteng = c.fetchone()[0]
+
+    # Jika Kalteng belum ada, bersihkan database lama agar migrasi ke 5 provinsi bersih sempurna
+    if has_kalteng == 0:
+        c.execute("DELETE FROM hotspot_clusters")
+        c.execute("DELETE FROM hotspot_daily_log")
+        c.execute("DELETE FROM fire_risk_forecast")
+        conn.commit()
+
         clusters = [
             # Jambi
             {
@@ -989,7 +1007,7 @@ def seed_historical_multi():
 
 
 # ==========================================
-# 6. LOGIKA PIVOT, REKAP PROVINSI & MAP DATA
+# 6. LOGIKA PIVOT, REKAP & MAP DATA
 # ==========================================
 def get_effective_date_and_session():
     now = datetime.now()
@@ -1267,7 +1285,7 @@ def run_scheduler():
 
 
 # ==========================================
-# 8. DASBOR FLASK + LEAFLET.JS SPATIAL MAP
+# 8. DASBOR WEB FLASK + LEAFLET.JS LENGKAP
 # ==========================================
 app = Flask(__name__)
 
@@ -1298,7 +1316,7 @@ HTML_TEMPLATE = """
         .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow-x: auto; margin-bottom: 24px; }
         .card-header-title { font-size: 16px; font-weight: 700; color: #0f172a; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
         
-        #map { height: 480px; width: 100%; border-radius: 10px; border: 1px solid #e2e8f0; }
+        #map { height: 490px; width: 100%; border-radius: 10px; border: 1px solid #e2e8f0; }
         
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }
@@ -1369,7 +1387,7 @@ HTML_TEMPLATE = """
             <option value="TERRA" {% if current_sat == 'TERRA' %}selected{% endif %}>🛰️ Terra / Aqua (1km)</option>
         </select>
 
-        <button class="btn btn-refresh" onclick="refreshData()">🔄 Sinkronisasi Sekarang</button>
+        <button class="btn btn-refresh" onclick="refreshData()">🔄 Sinkronisasi Hotspot & Cuaca</button>
     </div>
 
     <!-- KARTU STATISTIK UTAMA -->
@@ -1406,12 +1424,12 @@ HTML_TEMPLATE = """
     <div class="card">
         <div class="card-header-title">
             <span>🗺️ Visualisasi Spasial Sebaran Hotspot & Sentinel Kerawanan H-5</span>
-            <span style="font-size:12px; color:#64748b; font-weight:normal;">Peta diperbarui otomatis sesuai wilayah filter</span>
+            <span style="font-size:12px; color:#64748b; font-weight:normal;">Peta otomatis mengarahkan ke wilayah yang dipilih</span>
         </div>
         <div id="map"></div>
     </div>
 
-    <!-- REKAP POTENSI PER PROVINSI -->
+    <!-- REKAP POTENSI KARHUTLA ANTAR-PROVINSI -->
     <div class="card" style="border-top: 4px solid #0284c7;">
         <div class="card-header-title">
             📊 Rekapitulasi Matriks Status Potensi Karhutla Antar-Provinsi (5 Provinsi)
@@ -1456,10 +1474,10 @@ HTML_TEMPLATE = """
         </table>
     </div>
 
-    <!-- TABEL PERINGATAN DINI H-5 -->
+    <!-- TABEL DETAIL PREDIKSI H-5 & ANALISIS 3 ELEMEN -->
     <div class="card" style="border-left: 5px solid #e11d48;">
         <div class="card-header-title">
-            ⚠️ Detail Peringatan Dini Cuaca & Prediksi Kerawanan 5 Hari ke Depan (Open-Meteo Ensemble)
+            ⚠️ Detail Peringatan Dini Cuaca & Analisis 3 Elemen Pembakar 5 Hari ke Depan (Open-Meteo Ensemble)
         </div>
         <table>
             <thead>
@@ -1468,10 +1486,9 @@ HTML_TEMPLATE = """
                     <th>Titik Sentinel / Kawasan Kritis</th>
                     <th>Koordinat</th>
                     <th>Tanggal Proyeksi</th>
-                    <th>Suhu Maks</th>
-                    <th>Kelembapan Min</th>
-                    <th>Prediksi Hujan</th>
-                    <th>Angin Maks</th>
+                    <th>1. Suhu Puncak</th>
+                    <th>2. Bahan Bakar / Hujan</th>
+                    <th>3. Desikasi (RH / Angin)</th>
                     <th>Tipe Lahan</th>
                     <th>Indeks Risiko</th>
                     <th>Tingkat Ancaman</th>
@@ -1484,10 +1501,16 @@ HTML_TEMPLATE = """
                     <td><b>{{ f['nama_kawasan'] }}</b></td>
                     <td>{{ "%.3f"|format(f['latitude']) }}, {{ "%.3f"|format(f['longitude']) }}</td>
                     <td>{{ f['forecast_date'] }}</td>
-                    <td>{{ f['temp_max'] }}°C</td>
-                    <td>{{ f['rh_min'] }}%</td>
-                    <td>{{ f['precip_sum'] }} mm</td>
-                    <td>{{ f['wind_max'] }} km/j</td>
+                    <td><b>{{ f['temp_max'] }}°C</b></td>
+                    <td>
+                        {{ f['precip_sum'] }} mm 
+                        {% if f['precip_sum'] < 1.0 %}
+                            <span style="color:#dc2626; font-size:11px; font-weight:bold;">(Kering)</span>
+                        {% else %}
+                            <span style="color:#16a34a; font-size:11px;">(Lembap)</span>
+                        {% endif %}
+                    </td>
+                    <td>RH {{ f['rh_min'] }}% | {{ f['wind_max'] }} km/j</td>
                     <td>{% if f['is_gambut'] == 1 %}<span style="color:#ea580c; font-weight:700;">Gambut</span>{% else %}Mineral{% endif %}</td>
                     <td><b>{{ f['risk_score'] }}</b></td>
                     <td>
@@ -1559,7 +1582,7 @@ HTML_TEMPLATE = """
         </table>
     </div>
 
-    <!-- SCRIPT LEAFLET & INTERAKSI -->
+    <!-- SCRIPT LEAFLET & INTERAKSI LENGKAP -->
     <script>
         function applyFilters() {
             const prov = document.getElementById('provSelect').value;
@@ -1580,7 +1603,7 @@ HTML_TEMPLATE = """
                 })
                 .catch(e => {
                     alert('Gagal menyinkronkan data.');
-                    btn.innerHTML = '🔄 Sinkronisasi Sekarang';
+                    btn.innerHTML = '🔄 Sinkronisasi Hotspot & Cuaca';
                     btn.disabled = false;
                 });
         }
@@ -1597,7 +1620,7 @@ HTML_TEMPLATE = """
         const hotspotData = {{ rows|tojson }};
         const forecastData = {{ forecasts|tojson }};
 
-        // Render Hotspots (Circle Markers)
+        // Render Titik Hotspot (Circle Markers)
         hotspotData.forEach(pt => {
             const isPadam = pt.status_terakhir === 'Padam';
             const color = isPadam ? '#94a3b8' : (pt.status_terakhir === 'Tinggi' ? '#dc2626' : (pt.status_terakhir === 'Sedang' ? '#d97706' : '#16a34a'));
@@ -1611,18 +1634,18 @@ HTML_TEMPLATE = """
             }).addTo(map);
 
             circle.bindPopup(`
-                <div style="font-size:12px;">
-                    <strong style="color:${color}; font-size:13px;">Hotspot: ${pt.status_terakhir}</strong><br>
+                <div style="font-size:12px; min-width:200px;">
+                    <strong style="color:${color}; font-size:13px;">Status: Hotspot ${pt.status_terakhir}</strong><br>
                     <b>Kawasan:</b> ${pt.nama_kawasan}<br>
                     <b>Kabupaten:</b> ${pt.kabupaten} (${pt.provinsi})<br>
                     <b>Fungsi:</b> ${pt.fungsi_kawasan}<br>
                     <b>Tipe Lahan:</b> ${pt.is_gambut_label === 'Ya' ? 'Rawa Gambut' : 'Tanah Mineral'}<br>
-                    <b>Sensor:</b> ${pt.sensor_terdeteksi}
+                    <b>Sensor Satelit:</b> ${pt.sensor_terdeteksi}
                 </div>
             `);
         });
 
-        // Render Sentinel Forecast (Custom Markers)
+        // Render Titik Sentinel Prediksi H-5 (Popup 3 Elemen Pembakar)
         const sentinelRendered = new Set();
         forecastData.forEach(fc => {
             const key = fc.latitude + '_' + fc.longitude;
@@ -1641,21 +1664,23 @@ HTML_TEMPLATE = """
                 }).addTo(map);
 
                 marker.bindPopup(`
-                    <div style="font-size:12px;">
-                        <span style="background:${pulseColor}; color:white; padding:2px 6px; border-radius:4px; font-weight:bold;">
-                            Sentinel H-5: ${fc.risk_category}
+                    <div style="font-size:12px; min-width:230px;">
+                        <span style="background:${pulseColor}; color:white; padding:2px 8px; border-radius:4px; font-weight:bold;">
+                            🔥 Ancaman H-5: ${fc.risk_category} (${fc.risk_score}/100)
                         </span><br>
-                        <b style="font-size:13px; margin-top:4px; display:inline-block;">${fc.nama_kawasan}</b><br>
-                        <b>Provinsi:</b> ${fc.provinsi}<br>
-                        <b>Indeks Risiko:</b> ${fc.risk_score} / 100<br>
-                        <b>Prakiraan Suhu / RH:</b> ${fc.temp_max}°C / ${fc.rh_min}%<br>
-                        <b>Proyeksi Hujan:</b> ${fc.precip_sum} mm
+                        <b style="font-size:13px; display:inline-block; margin-top:6px;">${fc.nama_kawasan}</b><br>
+                        <span style="color:#64748b;">${fc.provinsi} | ${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
+                        <hr style="border:0; border-top:1px solid #e2e8f0; margin:6px 0;">
+                        <b>Analisis 3 Elemen Pembakar:</b><br>
+                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_max >= 34 ? '<span style="color:red; font-weight:bold;">Kritis</span>' : 'Normal'})<br>
+                        🍂 <b>2. Bahan Bakar / Hujan:</b> ${fc.precip_sum} mm (${fc.precip_sum < 1.0 ? '<span style="color:red; font-weight:bold;">Kering Ekstrim</span>' : 'Lembap'})<br>
+                        💨 <b>3. Desikasi (RH & Angin):</b> RH ${fc.rh_min}% | Angin ${fc.wind_max} km/j
                     </div>
                 `);
             }
         });
 
-        // Tambah Legenda Peta
+        // Legenda Spasial Peta
         const legend = L.control({position: 'bottomright'});
         legend.onAdd = function (map) {
             const div = L.DomUtil.create('div', 'legend-box');
@@ -1740,7 +1765,7 @@ def download_excel():
 
 
 # ==========================================
-# 9. INISIALISASI OTOMATIS (LOKAL & CLOUD)
+# 9. INISIALISASI OTOMATIS (LOKAL & SERVER CLOUD)
 # ==========================================
 init_db()
 seed_historical_multi()
