@@ -14,19 +14,140 @@ import schedule
 from scipy.spatial import cKDTree
 
 # ==========================================
-# KONFIGURASI SISTEM MULTI-PROVINSI
+# KONFIGURASI SISTEM (5 PROVINSI)
 # ==========================================
 DB_NAME = "hotspot_multi.db"
 DEFAULT_NASA_KEY = "DEMO_KEY"
 
-# Bounding Box Resmi (min_lon, min_lat, max_lon, max_lat)
 PROVINSI_BBOX = {
     "JAMBI": "101.15,-2.50,104.55,-0.75",
     "SUMSEL": "102.05,-4.95,106.15,-1.65",
     "JATIM": "110.85,-8.80,114.65,-6.75",
+    "KALTENG": "110.75,-3.55,115.85,0.75",
+    "KALTIM": "113.80,-2.45,119.05,2.85",
 }
 
-PJKARHUTLA_BASE_URL = "https://pjkarhutla-del.github.io/Monitor-Hotspot-HK"
+SENTINEL_POINTS = [
+    # Jambi
+    {
+        "prov": "JAMBI",
+        "kawasan": "TN Berbak (Pesisir Gambut)",
+        "lat": -1.352,
+        "lon": 104.102,
+        "gambut": 1,
+    },
+    {
+        "prov": "JAMBI",
+        "kawasan": "HL Gambut Bram Itam",
+        "lat": -1.120,
+        "lon": 103.180,
+        "gambut": 1,
+    },
+    {
+        "prov": "JAMBI",
+        "kawasan": "PBPH PT REKI (Hutan Harapan Jambi)",
+        "lat": -2.210,
+        "lon": 103.350,
+        "gambut": 0,
+    },
+    # Sumatera Selatan
+    {
+        "prov": "SUMSEL",
+        "kawasan": "PBPH Gambut OKI (Air Sugihan)",
+        "lat": -3.350,
+        "lon": 105.420,
+        "gambut": 1,
+    },
+    {
+        "prov": "SUMSEL",
+        "kawasan": "SM Padang Sugihan",
+        "lat": -2.950,
+        "lon": 105.050,
+        "gambut": 1,
+    },
+    {
+        "prov": "SUMSEL",
+        "kawasan": "TN Sembilang Pesisir",
+        "lat": -2.150,
+        "lon": 104.750,
+        "gambut": 1,
+    },
+    # Jawa Timur
+    {
+        "prov": "JATIM",
+        "kawasan": "TN Bromo Tengger Semeru",
+        "lat": -7.940,
+        "lon": 112.950,
+        "gambut": 0,
+    },
+    {
+        "prov": "JATIM",
+        "kawasan": "TN Baluran (Savana Bekol)",
+        "lat": -7.820,
+        "lon": 114.420,
+        "gambut": 0,
+    },
+    {
+        "prov": "JATIM",
+        "kawasan": "KPH Perhutani Bojonegoro",
+        "lat": -7.280,
+        "lon": 111.750,
+        "gambut": 0,
+    },
+    # Kalimantan Tengah
+    {
+        "prov": "KALTENG",
+        "kawasan": "TN Sebangau (Kubah Gambut)",
+        "lat": -2.350,
+        "lon": 113.850,
+        "gambut": 1,
+    },
+    {
+        "prov": "KALTENG",
+        "kawasan": "Eks-PLG Blok A Pulang Pisau",
+        "lat": -2.750,
+        "lon": 114.250,
+        "gambut": 1,
+    },
+    {
+        "prov": "KALTENG",
+        "kawasan": "TN Tanjung Puting",
+        "lat": -2.950,
+        "lon": 111.950,
+        "gambut": 1,
+    },
+    # Kalimantan Timur
+    {
+        "prov": "KALTIM",
+        "kawasan": "Tahura Bukit Soeharto / IKN",
+        "lat": -0.980,
+        "lon": 117.020,
+        "gambut": 0,
+    },
+    {
+        "prov": "KALTIM",
+        "kawasan": "TN Kutai (Sangkima)",
+        "lat": 0.250,
+        "lon": 117.350,
+        "gambut": 0,
+    },
+    {
+        "prov": "KALTIM",
+        "kawasan": "Konsesi Tambang/HTI Kutai Kartanegara",
+        "lat": -0.450,
+        "lon": 116.850,
+        "gambut": 0,
+    },
+]
+
+PROV_CENTERS = {
+    "ALL": [-1.5, 114.0, 5],
+    "JAMBI": [-1.6, 103.0, 8],
+    "SUMSEL": [-3.1, 104.5, 8],
+    "JATIM": [-7.7, 112.8, 8],
+    "KALTENG": [-2.2, 113.5, 7],
+    "KALTIM": [0.3, 116.8, 7],
+}
 
 
 # ==========================================
@@ -60,6 +181,23 @@ def init_db():
             confidence REAL,
             PRIMARY KEY (cluster_id, log_date, satellite_source),
             FOREIGN KEY (cluster_id) REFERENCES hotspot_clusters (cluster_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS fire_risk_forecast (
+            forecast_id TEXT PRIMARY KEY,
+            provinsi TEXT,
+            nama_kawasan TEXT,
+            latitude REAL,
+            longitude REAL,
+            forecast_date DATE,
+            temp_max REAL,
+            rh_min REAL,
+            precip_sum REAL,
+            wind_max REAL,
+            is_gambut INTEGER,
+            risk_score REAL,
+            risk_category TEXT
         )
     """)
     c.execute("""
@@ -97,7 +235,7 @@ def set_nasa_key(new_key):
 
 
 # ==========================================
-# 2. OVERLAY KAWASAN SPESIFIK 3 PROVINSI (UPDATED)
+# 2. OVERLAY KAWASAN SPESIFIK 5 PROVINSI
 # ==========================================
 def overlay_kawasan_multi(df_points):
     gdf = gpd.GeoDataFrame(
@@ -110,11 +248,8 @@ def overlay_kawasan_multi(df_points):
         prov = row["provinsi"]
         lat, lon = row["latitude"], row["longitude"]
 
-        # =========================================================
-        # 1. PROVINSI JAMBI
-        # =========================================================
+        # Jambi
         if prov == "JAMBI":
-            # TN Kerinci Seblat (TNKS) - Bagian Barat Jambi
             if lon <= 101.90 and lat <= -1.40:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -122,8 +257,6 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Kerinci / Merangin",
                 ])
-
-            # TN Bukit Tigapuluh (TNBT)
             elif 102.30 <= lon <= 102.85 and -1.40 <= lat <= -0.90:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -131,8 +264,6 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Tebo / Tanjab Barat",
                 ])
-
-            # TN Bukit Duabelas (TNBD)
             elif 102.50 <= lon <= 102.85 and -2.05 <= lat <= -1.75:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -140,8 +271,6 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Sarolangun / Batanghari",
                 ])
-
-            # TN Berbak (TNB) - Rawa Gambut Pesisir
             elif lon >= 104.00 and -1.60 <= lat <= -1.15:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -149,17 +278,13 @@ def overlay_kawasan_multi(df_points):
                     1,
                     "Tanjung Jabung Timur",
                 ])
-
-            # CA / KSA Gambut Bram Itam & Sungai Bakau
             elif 103.00 <= lon <= 103.45 and -1.25 <= lat <= -0.90:
                 return pd.Series([
-                    "Hutan Lindung (HL) / KSA",
-                    "HLG Bram Itam & CA Hutan Bakau Pantai",
+                    "Hutan Lindung (HL)",
+                    "HL Gambut Bram Itam",
                     1,
                     "Tanjung Jabung Barat",
                 ])
-
-            # PBPH PT REKI (Hutan Harapan) - Lanskap Jambi-Sumsel sisi Jambi
             elif 103.15 <= lon <= 103.55 and -2.40 <= lat <= -2.00:
                 return pd.Series([
                     "PBPH (Restorasi Ekosistem)",
@@ -167,48 +292,24 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Batanghari / Sarolangun",
                 ])
-
-            # PBPH PT WKS (Grup Sinarmas HTI Gambut & Mineral)
             elif 103.35 <= lon <= 103.85 and -1.65 <= lat <= -1.15:
                 return pd.Series([
                     "PBPH (Hutan Tanaman)",
                     "PBPH PT Wirakarya Sakti (WKS)",
                     1,
+                    "Muaro Jambi",
+                ])
+            else:
+                is_g = 1 if (lon >= 103.50 and lat >= -1.70) else 0
+                return pd.Series([
+                    f"APL (Lahan {'Gambut' if is_g else 'Mineral'})",
+                    "Areal Perkebunan / Lahan Budidaya",
+                    is_g,
                     "Muaro Jambi / Tanjabbar",
                 ])
 
-            # Tahura Orang Kayo Hitam (Muaro Jambi / Tanjabtim)
-            elif 103.80 <= lon <= 104.05 and -1.65 <= lat <= -1.40:
-                return pd.Series([
-                    "KPA (Tahura)",
-                    "Tahura Orang Kayo Hitam",
-                    1,
-                    "Muaro Jambi",
-                ])
-
-            # APL (Area Penggunaan Lain)
-            else:
-                is_g = 1 if (lon >= 103.50 and lat >= -1.70) else 0
-                g_str = "Gambut" if is_g == 1 else "Mineral"
-                kab = (
-                    "Batanghari"
-                    if lon < 103.3
-                    else (
-                        "Muaro Jambi" if lat < -1.5 else "Tanjung Jabung Barat"
-                    )
-                )
-                return pd.Series([
-                    f"APL (Lahan {g_str})",
-                    "Areal Perkebunan / Lahan Masyarakat",
-                    is_g,
-                    kab,
-                ])
-
-        # =========================================================
-        # 2. PROVINSI SUMATERA SELATAN
-        # =========================================================
+        # Sumatera Selatan
         elif prov == "SUMSEL":
-            # TN Kerinci Seblat (TNKS Wilayah Sumsel: Musi Rawas / Muratara / Lahat)
             if lon <= 103.15 and -3.40 <= lat <= -2.30:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -216,8 +317,6 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Musi Rawas / Muratara",
                 ])
-
-            # TN Sembilang (KPA Pesisir Rawa Gambut & Mangrove Banyuasin)
             elif 104.35 <= lon <= 105.10 and -2.45 <= lat <= -1.70:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -225,8 +324,6 @@ def overlay_kawasan_multi(df_points):
                     1,
                     "Banyuasin",
                 ])
-
-            # SM Padang Sugihan (KSA Gambut OKI & Banyuasin)
             elif 104.80 <= lon <= 105.35 and -3.20 <= lat <= -2.60:
                 return pd.Series([
                     "KSA (Suaka Margasatwa)",
@@ -234,8 +331,6 @@ def overlay_kawasan_multi(df_points):
                     1,
                     "Ogan Komering Ilir",
                 ])
-
-            # SM Dangku (KSA Hutan Dataran Rendah Musi Banyuasin)
             elif 103.65 <= lon <= 104.15 and -2.65 <= lat <= -2.25:
                 return pd.Series([
                     "KSA (Suaka Margasatwa)",
@@ -243,44 +338,13 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Musi Banyuasin",
                 ])
-
-            # SM Bentayan (Banyuasin)
-            elif 103.95 <= lon <= 104.35 and -2.35 <= lat <= -2.00:
+            elif lon >= 105.15 and -3.75 <= lat <= -2.75:
                 return pd.Series([
-                    "KSA (Suaka Margasatwa)",
-                    "SM Bentayan",
-                    0,
-                    "Banyuasin",
+                    "PBPH (Hutan Tanaman)",
+                    "PBPH HTI Gambut OKI",
+                    1,
+                    "Ogan Komering Ilir",
                 ])
-
-            # SM Isau-Isau / SM Gumai Pasemah / HL Bukit Dingin (KSA/HL Pegunungan)
-            elif lon <= 103.70 and lat <= -3.70:
-                return pd.Series([
-                    "KSA / Hutan Lindung",
-                    "SM Isau-Isau / HL Bukit Dingin",
-                    0,
-                    "Lahat / Empat Lawang / Muara Enim",
-                ])
-
-            # Tahura K.G.P.A.A. Mangkunegara (Musi Banyuasin)
-            elif 103.75 <= lon <= 104.05 and -2.30 <= lat <= -2.05:
-                return pd.Series([
-                    "KPA (Tahura)",
-                    "Tahura K.G.P.A.A. Mangkunegara",
-                    0,
-                    "Musi Banyuasin",
-                ])
-
-            # TWA Danau Ranau (OKU Selatan)
-            elif 103.80 <= lon <= 104.10 and lat <= -4.80:
-                return pd.Series([
-                    "KPA (TWA)",
-                    "TWA Danau Ranau",
-                    0,
-                    "Ogan Komering Ulu Selatan",
-                ])
-
-            # PBPH PT REKI (Hutan Harapan sisi Sumsel / Lanskap Trans-Boundary)
             elif 103.20 <= lon <= 103.60 and -2.60 <= lat <= -2.35:
                 return pd.Series([
                     "PBPH (Restorasi Ekosistem)",
@@ -288,55 +352,24 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Musi Banyuasin",
                 ])
-
-            # PBPH HTI Gambut Pesisir Timur OKI (Grup SBA Wood / BMH / dkk.)
-            elif lon >= 105.15 and -3.75 <= lat <= -2.75:
-                return pd.Series([
-                    "PBPH (Hutan Tanaman)",
-                    "PBPH HTI Gambut OKI (PT SBA/BMH/TPJ)",
-                    1,
-                    "Ogan Komering Ilir",
-                ])
-
-            # PBPH Musi Banyuasin (Hutan Produksi Mineral)
-            elif 103.40 <= lon <= 104.30 and -2.90 <= lat <= -2.10:
-                return pd.Series([
-                    "PBPH (Hutan Produksi)",
-                    "PBPH Wilayah Musi Banyuasin",
-                    0,
-                    "Musi Banyuasin",
-                ])
-
-            # APL (Area Penggunaan Lain - Perkebunan Sawit/Karet & Lahan Masyarakat)
             else:
                 is_g = 1 if lon >= 104.70 else 0
-                g_str = "Gambut" if is_g == 1 else "Mineral"
-                kab = (
-                    "Ogan Komering Ilir"
-                    if lon >= 104.90
-                    else ("Banyuasin" if lat >= -2.8 else "Ogan Ilir")
-                )
                 return pd.Series([
-                    f"APL (Lahan {g_str})",
-                    "Areal Perkebunan / Lahan Budidaya",
+                    f"APL (Lahan {'Gambut' if is_g else 'Mineral'})",
+                    "Perkebunan Sawit / Karet Rakyat",
                     is_g,
-                    kab,
+                    "OKI / Banyuasin",
                 ])
 
-        # =========================================================
-        # 3. PROVINSI JAWA TIMUR (SELURUHNYA NON-GAMBUT / MINERAL)
-        # =========================================================
+        # Jawa Timur
         elif prov == "JATIM":
-            # TN Bromo Tengger Semeru (TNBTS - KPA Pegunungan)
             if 112.80 <= lon <= 113.15 and -8.20 <= lat <= -7.85:
                 return pd.Series([
                     "KPA (Taman Nasional)",
-                    "TN Bromo Tengger Semeru (TNBTS)",
+                    "TN Bromo Tengger Semeru",
                     0,
-                    "Malang / Probolinggo / Pasuruan / Lumajang",
+                    "Malang / Probolinggo",
                 ])
-
-            # TN Baluran (KPA Savana & Hutan Musim)
             elif 114.25 <= lon <= 114.55 and -7.95 <= lat <= -7.70:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -344,8 +377,6 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Situbondo",
                 ])
-
-            # TN Meru Betiri (KPA Pesisir Selatan Jember-Banyuwangi)
             elif 113.60 <= lon <= 114.05 and -8.65 <= lat <= -8.30:
                 return pd.Series([
                     "KPA (Taman Nasional)",
@@ -353,90 +384,105 @@ def overlay_kawasan_multi(df_points):
                     0,
                     "Jember / Banyuwangi",
                 ])
-
-            # TN Alas Purwo (KPA Semenanjung Blambangan)
-            elif lon >= 114.30 and -8.80 <= lat <= -8.50:
-                return pd.Series([
-                    "KPA (Taman Nasional)",
-                    "TN Alas Purwo",
-                    0,
-                    "Banyuwangi",
-                ])
-
-            # Tahura Raden Soerjo (KPA Lereng Arjuno-Welirang)
             elif 112.45 <= lon <= 112.75 and -7.85 <= lat <= -7.60:
                 return pd.Series([
                     "KPA (Tahura)",
                     "Tahura Raden Soerjo",
                     0,
-                    "Mojokerto / Batu / Pasuruan / Malang",
+                    "Mojokerto / Batu",
                 ])
-
-            # SM Dataran Tinggi Yang / Gn. Argopuro (KSA)
-            elif 113.45 <= lon <= 113.75 and -8.05 <= lat <= -7.85:
-                return pd.Series([
-                    "KSA (Suaka Margasatwa)",
-                    "SM Dataran Tinggi Yang (Argopuro)",
-                    0,
-                    "Probolinggo / Jember / Bondowoso",
-                ])
-
-            # CA / TWA Kawah Ijen (KSA/KPA)
-            elif 114.15 <= lon <= 114.35 and -8.15 <= lat <= -7.95:
-                return pd.Series([
-                    "KPA (TWA) / CA",
-                    "TWA Kawah Ijen & CA Merapi Ungup-Ungup",
-                    0,
-                    "Banyuwangi / Bondowoso",
-                ])
-
-            # CA Pulau Sempu (KSA Pesisir Malang Selatan)
-            elif 112.65 <= lon <= 112.75 and -8.48 <= lat <= -8.42:
-                return pd.Series([
-                    "KSA (Cagar Alam)",
-                    "CA Pulau Sempu",
-                    0,
-                    "Malang",
-                ])
-
-            # KPH Perum Perhutani (Divre Jawa Timur: Hutan Jati & Pinus)
-            elif (
-                (111.35 <= lon <= 112.25 and -7.65 <= lat <= -7.05)
-                or (111.70 <= lon <= 112.50 and -8.25 <= lat <= -7.75)
-                or (113.80 <= lon <= 114.35 and -8.40 <= lat <= -7.80)
+            elif (111.35 <= lon <= 112.25 and -7.65 <= lat <= -7.05) or (
+                111.70 <= lon <= 112.50 and -8.25 <= lat <= -7.75
             ):
-                kab = (
-                    "Bojonegoro / Ngawi / Tuban"
-                    if lat > -7.5
-                    else (
-                        "Madiun / Ponorogo / Trenggalek"
-                        if lon < 112.5
-                        else "Bondowoso / Banyuwangi"
-                    )
-                )
                 return pd.Series([
                     "KPH Perhutani (HP/HL)",
-                    "Hutan Produksi/Lindung Perum Perhutani",
+                    "Hutan Produksi Perum Perhutani",
                     0,
-                    kab,
+                    "Bojonegoro / Madiun",
                 ])
-
-            # APL (Lahan Mineral: Sawah, Tegalan, Perkebunan, Pemukiman)
             else:
-                kab = (
-                    "Madiun / Magetan"
-                    if lon < 111.8
-                    else (
-                        "Kediri / Blitar / Malang"
-                        if lon < 112.8
-                        else "Probolinggo / Lumajang / Jember"
-                    )
-                )
                 return pd.Series([
                     "APL (Lahan Mineral)",
-                    "Areal Pertanian / Tegalan / Perkebunan Rakyat",
+                    "Tegalan / Sawah / Pemukiman",
                     0,
-                    kab,
+                    "Kediri / Malang / Blitar",
+                ])
+
+        # Kalimantan Tengah
+        elif prov == "KALTENG":
+            if 113.25 <= lon <= 114.15 and -3.25 <= lat <= -2.00:
+                return pd.Series([
+                    "KPA (Taman Nasional)",
+                    "TN Sebangau (Kubah Gambut)",
+                    1,
+                    "Palangka Raya / Pulang Pisau",
+                ])
+            elif 111.70 <= lon <= 112.35 and -3.35 <= lat <= -2.55:
+                return pd.Series([
+                    "KPA (Taman Nasional)",
+                    "TN Tanjung Puting",
+                    1,
+                    "Kotawaringin Barat",
+                ])
+            elif 114.00 <= lon <= 114.85 and -3.10 <= lat <= -2.30:
+                return pd.Series([
+                    "Kawasan Hidrologis Gambut (KHG)",
+                    "Kawasan Eks-PLG Sejuta Hektar",
+                    1,
+                    "Pulang Pisau / Kapuas",
+                ])
+            elif 112.00 <= lon <= 113.80 and -2.50 <= lat <= -1.50:
+                return pd.Series([
+                    "PBPH / Perkebunan",
+                    "Areal Konsesi Hutan / Sawit Kalteng",
+                    1,
+                    "Kotawaringin Timur",
+                ])
+            else:
+                is_g = 1 if lat <= -1.80 else 0
+                return pd.Series([
+                    f"APL (Lahan {'Gambut' if is_g else 'Mineral'})",
+                    "Lahan Budidaya / Masyarakat Kalteng",
+                    is_g,
+                    "Katingan / Seruyan / Kapuas",
+                ])
+
+        # Kalimantan Timur
+        elif prov == "KALTIM":
+            if 116.70 <= lon <= 117.20 and -1.25 <= lat <= -0.75:
+                return pd.Series([
+                    "KPA (Tahura) / Kawasan IKN",
+                    "Tahura Bukit Soeharto & Lanskap IKN",
+                    0,
+                    "Kutai Kartanegara / PPU",
+                ])
+            elif 117.10 <= lon <= 117.60 and 0.10 <= lat <= 0.65:
+                return pd.Series([
+                    "KPA (Taman Nasional)",
+                    "TN Kutai",
+                    0,
+                    "Kutai Timur / Bontang",
+                ])
+            elif 116.80 <= lon <= 117.00 and -1.18 <= lat <= -1.05:
+                return pd.Series([
+                    "Hutan Lindung (HL)",
+                    "HL Sungai Wain (HLSW)",
+                    0,
+                    "Balikpapan",
+                ])
+            elif 115.50 <= lon <= 117.00 and -0.80 <= lat <= 0.50:
+                return pd.Series([
+                    "PBPH / Konsesi",
+                    "Konsesi HTI & Tambang Mahakam",
+                    0,
+                    "Kutai Kartanegara / Kutai Barat",
+                ])
+            else:
+                return pd.Series([
+                    "APL (Lahan Mineral)",
+                    "Perkebunan / Pemukiman Kaltim",
+                    0,
+                    "Berau / Paser / Kutai Timur",
                 ])
 
         return pd.Series(["Lainnya", "Area Luar Wilayah", 0, "Kabupaten"])
@@ -446,14 +492,15 @@ def overlay_kawasan_multi(df_points):
     )
     return gdf
 
+
 # ==========================================
-# 3. SPATIAL CLUSTERING (~500 meter per Provinsi)
+# 3. SPATIAL CLUSTERING (~500m)
 # ==========================================
 def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
     c = conn.cursor()
     matched_ids = []
 
-    for prov in ["JAMBI", "SUMSEL", "JATIM"]:
+    for prov in ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]:
         prov_gdf = new_gdf[new_gdf["provinsi"] == prov]
         if prov_gdf.empty:
             continue
@@ -492,21 +539,17 @@ def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
 
         ex_ids = [e[0] for e in existing]
         ex_coords = [[e[1], e[2]] for e in existing]
-        deg_to_km = 111.0
-        tree = cKDTree(np.array(ex_coords) * deg_to_km)
+        tree = cKDTree(np.array(ex_coords) * 111.0)
 
         for idx, row in prov_gdf.iterrows():
-            pt = np.array([row.latitude, row.longitude]) * deg_to_km
+            pt = np.array([row.latitude, row.longitude]) * 111.0
             dist, index = tree.query(pt, distance_upper_bound=threshold_km)
 
             if dist < threshold_km:
                 cid = ex_ids[index]
                 c.execute(
-                    """
-                    UPDATE hotspot_clusters 
-                    SET last_detected = ?, consecutive_padam_days = 0 
-                    WHERE cluster_id = ?
-                """,
+                    "UPDATE hotspot_clusters SET last_detected = ?,"
+                    " consecutive_padam_days = 0 WHERE cluster_id = ?",
                     (row.date, cid),
                 )
             else:
@@ -532,18 +575,17 @@ def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
             matched_ids.append((cid, row.name))
 
     conn.commit()
-    # Petakan id kembali sesuai urutan indeks dataframe
     id_dict = {orig_idx: cid for cid, orig_idx in matched_ids}
     return [id_dict.get(idx, f"HS-GEN-{idx}") for idx in new_gdf.index]
 
 
 # ==========================================
-# 4. KONEKTOR PENARIKAN DATA NASA & GITHUB HK
+# 4. KONEKTOR PENARIKAN DATA NASA & CUACA
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     prov_keys = (
-        ["JAMBI", "SUMSEL", "JATIM"]
+        ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]
         if target_prov == "ALL"
         else [target_prov]
     )
@@ -563,18 +605,15 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                     df = pd.read_csv(io.StringIO(resp.text))
                     for _, r in df.iterrows():
                         c_raw = str(r.get("confidence", "n")).lower()
-                        if c_raw == "h":
-                            c_val = 90.0
-                        elif c_raw == "n":
-                            c_val = 55.0
-                        elif c_raw == "l":
-                            c_val = 20.0
-                        else:
-                            try:
-                                c_val = float(c_raw)
-                            except ValueError:
-                                c_val = 50.0
-
+                        c_val = (
+                            90.0
+                            if c_raw == "h"
+                            else (
+                                55.0
+                                if c_raw == "n"
+                                else (20.0 if c_raw == "l" else float(c_raw))
+                            )
+                        )
                         combined.append({
                             "provinsi": p,
                             "latitude": float(r["latitude"]),
@@ -585,6 +624,85 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
             except Exception:
                 pass
     return combined
+
+
+def update_fire_risk_forecast_multi():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+
+    for item in SENTINEL_POINTS:
+        lat, lon = item["lat"], item["lon"]
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+            "&daily=temperature_2m_max,relative_humidity_2m_min,precipitation_sum,wind_speed_10m_max"
+            "&timezone=Asia%2FJakarta&forecast_days=5"
+        )
+        try:
+            r = requests.get(url, timeout=8)
+            if r.status_code == 200:
+                data = r.json().get("daily", {})
+                times = data.get("time", [])
+                t_max = data.get("temperature_2m_max", [])
+                rh_min = data.get("relative_humidity_2m_min", [])
+                precip = data.get("precipitation_sum", [])
+                wind = data.get("wind_speed_10m_max", [])
+
+                for i in range(len(times)):
+                    fc_date = times[i]
+                    tm = t_max[i] if i < len(t_max) else 32.0
+                    rm = rh_min[i] if i < len(rh_min) else 60.0
+                    pr = precip[i] if i < len(precip) else 0.0
+                    wn = wind[i] if i < len(wind) else 10.0
+
+                    temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
+                    rh_score = min(max((75.0 - rm) * 1.2, 0), 30)
+                    dry_score = 25 if pr < 1.0 else (10 if pr < 5.0 else 0)
+                    peat_multiplier = 1.25 if item["gambut"] == 1 else 1.05
+
+                    raw_score = (
+                        (temp_score + rh_score + dry_score)
+                        * peat_multiplier
+                        * (1.0 + (wn / 60.0))
+                    )
+                    score = min(round(raw_score, 1), 100.0)
+
+                    if score >= 80:
+                        cat = "Ekstrim"
+                    elif score >= 60:
+                        cat = "Tinggi"
+                    elif score >= 35:
+                        cat = "Sedang"
+                    else:
+                        cat = "Rendah"
+
+                    fid = f"FC-{item['prov']}-{fc_date}-{int(lat*100)}-{int(lon*100)}"
+                    c.execute(
+                        """
+                        INSERT OR REPLACE INTO fire_risk_forecast
+                        (forecast_id, provinsi, nama_kawasan, latitude, longitude, forecast_date, temp_max, rh_min, precip_sum, wind_max, is_gambut, risk_score, risk_category)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            fid,
+                            item["prov"],
+                            item["kawasan"],
+                            lat,
+                            lon,
+                            fc_date,
+                            tm,
+                            rm,
+                            pr,
+                            wn,
+                            item["gambut"],
+                            score,
+                            cat,
+                        ),
+                    )
+        except Exception:
+            pass
+
+    conn.commit()
+    conn.close()
 
 
 def sync_hotspots_multi(target_date_str):
@@ -600,11 +718,9 @@ def sync_hotspots_multi(target_date_str):
     df_raw["date"] = target_date_str
 
     def set_status(conf):
-        if conf >= 80:
-            return "Tinggi"
-        if conf >= 30:
-            return "Sedang"
-        return "Rendah"
+        return (
+            "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+        )
 
     df_raw["status"] = df_raw["confidence"].apply(set_status)
     gdf = overlay_kawasan_multi(df_raw)
@@ -625,7 +741,6 @@ def sync_hotspots_multi(target_date_str):
             ),
         )
 
-    # Identifikasi cluster yang padam
     c.execute(
         "SELECT cluster_id, consecutive_padam_days FROM hotspot_clusters WHERE"
         " is_active = 1"
@@ -663,7 +778,7 @@ def sync_hotspots_multi(target_date_str):
 
 
 # ==========================================
-# 5. SEED DATA HISTORIS 3 PROVINSI (14 - 23 SEPT 2026)
+# 5. SEED DATA HISTORIS (5 PROVINSI)
 # ==========================================
 def seed_historical_multi():
     conn = sqlite3.connect(DB_NAME)
@@ -673,7 +788,7 @@ def seed_historical_multi():
 
     if count == 0:
         clusters = [
-            # --- JAMBI ---
+            # Jambi
             {
                 "id": "HS-JAMBI-01",
                 "prov": "JAMBI",
@@ -683,18 +798,13 @@ def seed_historical_multi():
                 "f_kws": "KPA (Taman Nasional)",
                 "n_kws": "TN Berbak (TNB)",
                 "gambut": 1,
-                "first": "2026-09-16",
-                "last": "2026-09-23",
+                "first": "2026-10-10",
+                "last": "2026-10-17",
                 "padam_cnt": 0,
                 "logs": {
-                    "2026-09-16": ("Sedang", 65, "Terra/Aqua"),
-                    "2026-09-17": ("Sedang", 70, "Terra/Aqua"),
-                    "2026-09-18": ("Tinggi", 85, "Terra/Aqua"),
-                    "2026-09-19": ("Tinggi", 88, "HK-PJKarhutla"),
-                    "2026-09-20": ("Tinggi", 90, "HK-PJKarhutla"),
-                    "2026-09-21": ("Tinggi", 92, "HK-PJKarhutla"),
-                    "2026-09-22": ("Tinggi", 94, "HK-PJKarhutla"),
-                    "2026-09-23": ("Tinggi", 93, "HK-PJKarhutla"),
+                    "2026-10-15": ("Tinggi", 92, "HK-PJKarhutla"),
+                    "2026-10-16": ("Tinggi", 94, "HK-PJKarhutla"),
+                    "2026-10-17": ("Tinggi", 93, "HK-PJKarhutla"),
                 },
             },
             {
@@ -706,44 +816,22 @@ def seed_historical_multi():
                 "f_kws": "PBPH (Hutan Tanaman)",
                 "n_kws": "PBPH PT WKS",
                 "gambut": 1,
-                "first": "2026-09-14",
-                "last": "2026-09-16",
-                "padam_cnt": 7,
+                "first": "2026-10-08",
+                "last": "2026-10-11",
+                "padam_cnt": 6,
                 "logs": {
-                    "2026-09-14": ("Sedang", 60, "Terra/Aqua"),
-                    "2026-09-15": ("Tinggi", 82, "NOAA-20"),
-                    "2026-09-16": ("Sedang", 55, "Terra/Aqua"),
-                    "2026-09-17": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-18": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-19": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-20": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-21": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-22": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-23": ("Padam", 0, "Terra/Aqua"),
+                    "2026-10-09": ("Sedang", 60, "Terra/Aqua"),
+                    "2026-10-10": ("Tinggi", 82, "NOAA-20"),
+                    "2026-10-11": ("Sedang", 55, "Terra/Aqua"),
+                    "2026-10-12": ("Padam", 0, "Terra/Aqua"),
+                    "2026-10-13": ("Padam", 0, "Terra/Aqua"),
+                    "2026-10-14": ("Padam", 0, "Terra/Aqua"),
+                    "2026-10-15": ("Padam", 0, "Terra/Aqua"),
+                    "2026-10-16": ("Padam", 0, "Terra/Aqua"),
+                    "2026-10-17": ("Padam", 0, "Terra/Aqua"),
                 },
             },
-            {
-                "id": "HS-JAMBI-03",
-                "prov": "JAMBI",
-                "lat": -1.8900,
-                "lon": 102.6100,
-                "kab": "Sarolangun / Batanghari",
-                "f_kws": "KPA (Taman Nasional)",
-                "n_kws": "TN Bukit Duabelas (TNBD)",
-                "gambut": 0,
-                "first": "2026-09-18",
-                "last": "2026-09-23",
-                "padam_cnt": 0,
-                "logs": {
-                    "2026-09-18": ("Sedang", 55, "Terra/Aqua"),
-                    "2026-09-19": ("Sedang", 72, "Terra/Aqua"),
-                    "2026-09-20": ("Tinggi", 86, "HK-PJKarhutla"),
-                    "2026-09-21": ("Tinggi", 91, "HK-PJKarhutla"),
-                    "2026-09-22": ("Tinggi", 92, "HK-PJKarhutla"),
-                    "2026-09-23": ("Tinggi", 94, "HK-PJKarhutla"),
-                },
-            },
-            # --- SUMATERA SELATAN ---
+            # Sumsel
             {
                 "id": "HS-SUMSEL-01",
                 "prov": "SUMSEL",
@@ -753,17 +841,13 @@ def seed_historical_multi():
                 "f_kws": "PBPH (Hutan Tanaman)",
                 "n_kws": "PBPH HTI Gambut OKI",
                 "gambut": 1,
-                "first": "2026-09-17",
-                "last": "2026-09-23",
+                "first": "2026-10-11",
+                "last": "2026-10-17",
                 "padam_cnt": 0,
                 "logs": {
-                    "2026-09-17": ("Sedang", 65, "Terra/Aqua"),
-                    "2026-09-18": ("Tinggi", 88, "NOAA-20"),
-                    "2026-09-19": ("Tinggi", 92, "NOAA-20"),
-                    "2026-09-20": ("Tinggi", 95, "NOAA-20"),
-                    "2026-09-21": ("Tinggi", 96, "NOAA-20"),
-                    "2026-09-22": ("Tinggi", 91, "NOAA-20"),
-                    "2026-09-23": ("Tinggi", 93, "NOAA-20"),
+                    "2026-10-15": ("Tinggi", 96, "NOAA-20"),
+                    "2026-10-16": ("Tinggi", 91, "NOAA-20"),
+                    "2026-10-17": ("Tinggi", 93, "NOAA-20"),
                 },
             },
             {
@@ -775,100 +859,88 @@ def seed_historical_multi():
                 "f_kws": "KSA (Suaka Margasatwa)",
                 "n_kws": "SM Padang Sugihan",
                 "gambut": 1,
-                "first": "2026-09-15",
-                "last": "2026-09-18",
-                "padam_cnt": 5,
-                "logs": {
-                    "2026-09-15": ("Sedang", 55, "Terra/Aqua"),
-                    "2026-09-16": ("Tinggi", 84, "HK-PJKarhutla"),
-                    "2026-09-17": ("Sedang", 50, "HK-PJKarhutla"),
-                    "2026-09-18": ("Rendah", 25, "Terra/Aqua"),
-                    "2026-09-19": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-20": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-21": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-22": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-23": ("Padam", 0, "Terra/Aqua"),
-                },
-            },
-            {
-                "id": "HS-SUMSEL-03",
-                "prov": "SUMSEL",
-                "lat": -2.1500,
-                "lon": 104.7500,
-                "kab": "Banyuasin",
-                "f_kws": "KPA (Taman Nasional)",
-                "n_kws": "TN Sembilang",
-                "gambut": 1,
-                "first": "2026-09-21",
-                "last": "2026-09-23",
+                "first": "2026-10-12",
+                "last": "2026-10-17",
                 "padam_cnt": 0,
                 "logs": {
-                    "2026-09-21": ("Sedang", 68, "HK-PJKarhutla"),
-                    "2026-09-22": ("Tinggi", 85, "HK-PJKarhutla"),
-                    "2026-09-23": ("Tinggi", 89, "HK-PJKarhutla"),
+                    "2026-10-15": ("Sedang", 72, "Terra/Aqua"),
+                    "2026-10-16": ("Tinggi", 84, "HK-PJKarhutla"),
+                    "2026-10-17": ("Tinggi", 88, "HK-PJKarhutla"),
                 },
             },
-            # --- JAWA TIMUR ---
+            # Jatim
             {
                 "id": "HS-JATIM-01",
                 "prov": "JATIM",
                 "lat": -7.9400,
                 "lon": 112.9500,
-                "kab": "Malang / Probolinggo / Pasuruan",
+                "kab": "Malang / Probolinggo",
                 "f_kws": "KPA (Taman Nasional)",
-                "n_kws": "TN Bromo Tengger Semeru (TNBTS)",
+                "n_kws": "TN Bromo Tengger Semeru",
                 "gambut": 0,
-                "first": "2026-09-19",
-                "last": "2026-09-23",
+                "first": "2026-10-13",
+                "last": "2026-10-17",
                 "padam_cnt": 0,
                 "logs": {
-                    "2026-09-19": ("Sedang", 55, "Terra/Aqua"),
-                    "2026-09-20": ("Sedang", 72, "Terra/Aqua"),
-                    "2026-09-21": ("Tinggi", 86, "HK-PJKarhutla"),
-                    "2026-09-22": ("Tinggi", 88, "HK-PJKarhutla"),
-                    "2026-09-23": ("Tinggi", 91, "HK-PJKarhutla"),
+                    "2026-10-15": ("Tinggi", 86, "HK-PJKarhutla"),
+                    "2026-10-16": ("Tinggi", 88, "HK-PJKarhutla"),
+                    "2026-10-17": ("Tinggi", 91, "HK-PJKarhutla"),
+                },
+            },
+            # Kalteng
+            {
+                "id": "HS-KALTENG-01",
+                "prov": "KALTENG",
+                "lat": -2.3500,
+                "lon": 113.8500,
+                "kab": "Palangka Raya / Pulang Pisau",
+                "f_kws": "KPA (Taman Nasional)",
+                "n_kws": "TN Sebangau (Kubah Gambut)",
+                "gambut": 1,
+                "first": "2026-10-12",
+                "last": "2026-10-17",
+                "padam_cnt": 0,
+                "logs": {
+                    "2026-10-15": ("Tinggi", 89, "NOAA-20"),
+                    "2026-10-16": ("Tinggi", 95, "NOAA-20"),
+                    "2026-10-17": ("Tinggi", 94, "NOAA-20"),
                 },
             },
             {
-                "id": "HS-JATIM-02",
-                "prov": "JATIM",
-                "lat": -7.8200,
-                "lon": 114.4200,
-                "kab": "Situbondo",
-                "f_kws": "KPA (Taman Nasional)",
-                "n_kws": "TN Baluran",
-                "gambut": 0,
-                "first": "2026-09-16",
-                "last": "2026-09-19",
-                "padam_cnt": 4,
-                "logs": {
-                    "2026-09-16": ("Sedang", 60, "Terra/Aqua"),
-                    "2026-09-17": ("Tinggi", 84, "NOAA-20"),
-                    "2026-09-18": ("Sedang", 50, "Terra/Aqua"),
-                    "2026-09-19": ("Rendah", 24, "Terra/Aqua"),
-                    "2026-09-20": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-21": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-22": ("Padam", 0, "Terra/Aqua"),
-                    "2026-09-23": ("Padam", 0, "Terra/Aqua"),
-                },
-            },
-            {
-                "id": "HS-JATIM-03",
-                "prov": "JATIM",
-                "lat": -7.3800,
-                "lon": 111.7500,
-                "kab": "Bojonegoro / Ngawi",
-                "f_kws": "KPH Perhutani",
-                "n_kws": "Hutan Produksi Perhutani Divre Jatim",
-                "gambut": 0,
-                "first": "2026-09-20",
-                "last": "2026-09-23",
+                "id": "HS-KALTENG-02",
+                "prov": "KALTENG",
+                "lat": -2.7500,
+                "lon": 114.2500,
+                "kab": "Pulang Pisau",
+                "f_kws": "Kawasan Hidrologis Gambut (KHG)",
+                "n_kws": "Kawasan Eks-PLG Sejuta Hektar",
+                "gambut": 1,
+                "first": "2026-10-10",
+                "last": "2026-10-17",
                 "padam_cnt": 0,
                 "logs": {
-                    "2026-09-20": ("Rendah", 28, "Terra/Aqua"),
-                    "2026-09-21": ("Sedang", 55, "Terra/Aqua"),
-                    "2026-09-22": ("Sedang", 62, "Terra/Aqua"),
-                    "2026-09-23": ("Sedang", 68, "Terra/Aqua"),
+                    "2026-10-15": ("Tinggi", 87, "Terra/Aqua"),
+                    "2026-10-16": ("Tinggi", 92, "Terra/Aqua"),
+                    "2026-10-17": ("Tinggi", 96, "Terra/Aqua"),
+                },
+            },
+            # Kaltim
+            {
+                "id": "HS-KALTIM-01",
+                "prov": "KALTIM",
+                "lat": -0.9800,
+                "lon": 117.0200,
+                "kab": "Kutai Kartanegara / PPU",
+                "f_kws": "KPA (Tahura) / Kawasan IKN",
+                "n_kws": "Tahura Bukit Soeharto & Lanskap IKN",
+                "gambut": 0,
+                "first": "2026-10-14",
+                "last": "2026-10-17",
+                "padam_cnt": 0,
+                "logs": {
+                    "2026-10-15": ("Rendah", 28, "Terra/Aqua"),
+                    "2026-10-16": ("Sedang", 65, "Terra/Aqua"),
+                    "2026-10-17": ("Tinggi", 84, "Terra/Aqua"),
                 },
             },
         ]
@@ -895,7 +967,7 @@ def seed_historical_multi():
                 ),
             )
 
-            base_date = date(2026, 9, 14)
+            base_date = date(2026, 10, 8)
             for day_offset in range(10):
                 d_str = (base_date + timedelta(days=day_offset)).strftime(
                     "%Y-%m-%d"
@@ -904,7 +976,6 @@ def seed_historical_multi():
                     status, conf, sat = item["logs"][d_str]
                 else:
                     status, conf, sat = "Padam", 0.0, "Terra/Aqua"
-
                 c.execute(
                     """
                     INSERT OR REPLACE INTO hotspot_daily_log (cluster_id, log_date, satellite_source, status, confidence)
@@ -918,7 +989,7 @@ def seed_historical_multi():
 
 
 # ==========================================
-# 6. LOGIKA CUT-OFF & PIVOT 10 HARI
+# 6. LOGIKA PIVOT, REKAP PROVINSI & MAP DATA
 # ==========================================
 def get_effective_date_and_session():
     now = datetime.now()
@@ -933,6 +1004,82 @@ def get_effective_date_and_session():
         effective_date = now.date()
         session_text = "Sesi Sore 18.00 WIB (Hari Ini)"
     return effective_date, session_text
+
+
+def get_provincial_potential_summary():
+    conn = sqlite3.connect(DB_NAME)
+    summary = []
+    prov_list = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]
+
+    for p in prov_list:
+        df_p = pd.read_sql_query(
+            f"SELECT risk_score, risk_category, is_gambut FROM fire_risk_forecast WHERE provinsi = '{p}'",
+            conn,
+        )
+        df_hs = pd.read_sql_query(
+            f"SELECT COUNT(*) as hs_cnt FROM hotspot_clusters WHERE provinsi = '{p}' AND is_active = 1",
+            conn,
+        )
+
+        ekstrim = (
+            int((df_p["risk_category"] == "Ekstrim").sum())
+            if not df_p.empty
+            else 0
+        )
+        tinggi = (
+            int((df_p["risk_category"] == "Tinggi").sum())
+            if not df_p.empty
+            else 0
+        )
+        gambut = (
+            int(
+                (
+                    (df_p["risk_score"] >= 60) & (df_p["is_gambut"] == 1)
+                ).sum()
+            )
+            if not df_p.empty
+            else 0
+        )
+        hs_count = int(df_hs.iloc[0]["hs_cnt"]) if not df_hs.empty else 0
+
+        if ekstrim >= 2:
+            status_label = "Siaga 1 (Kritis Ekstrim)"
+            badge_class = "badge-ekstrim"
+        elif ekstrim >= 1 or tinggi >= 2:
+            status_label = "Siaga 2 (Tinggi)"
+            badge_class = "badge-tinggi"
+        else:
+            status_label = "Waspada"
+            badge_class = "badge-sedang"
+
+        summary.append({
+            "provinsi": p,
+            "status_label": status_label,
+            "badge_class": badge_class,
+            "ekstrim_cnt": ekstrim,
+            "tinggi_cnt": tinggi,
+            "gambut_cnt": gambut,
+            "hs_count": hs_count,
+        })
+
+    conn.close()
+    return summary
+
+
+def get_forecast_summary_multi(filter_prov="ALL"):
+    conn = sqlite3.connect(DB_NAME)
+    prov_where = (
+        "" if filter_prov == "ALL" else f"WHERE provinsi = '{filter_prov}'"
+    )
+    query = f"""
+        SELECT provinsi, nama_kawasan, latitude, longitude, forecast_date, temp_max, rh_min, precip_sum, wind_max, is_gambut, risk_score, risk_category
+        FROM fire_risk_forecast
+        {prov_where}
+        ORDER BY forecast_date ASC, risk_score DESC
+    """
+    df_fc = pd.read_sql_query(query, conn)
+    conn.close()
+    return df_fc.to_dict(orient="records") if not df_fc.empty else []
 
 
 def generate_table_multi(
@@ -966,17 +1113,18 @@ def generate_table_multi(
         "aktif": 0,
         "konservasi": 0,
         "gambut": 0,
+        "ekstrim_fc": 0,
     }
 
     if df_clusters.empty:
         conn.close()
         return pd.DataFrame(), date_list, summary_stats
 
-    sat_condition = ""
+    sat_cond = ""
     if filter_sat == "NOAA":
-        sat_condition = "AND satellite_source LIKE '%NOAA%'"
+        sat_cond = "AND satellite_source LIKE '%NOAA%'"
     elif filter_sat == "TERRA":
-        sat_condition = "AND satellite_source LIKE '%Terra%'"
+        sat_cond = "AND satellite_source LIKE '%Terra%'"
 
     if filter_source == "GITHUB_HK":
         df_clusters = df_clusters[
@@ -988,15 +1136,26 @@ def generate_table_multi(
     query_logs = f"""
         SELECT cluster_id, log_date, status, confidence, satellite_source
         FROM hotspot_daily_log 
-        WHERE log_date >= '{min_date}' AND log_date <= '{date_list[-1]}' {sat_condition}
+        WHERE log_date >= '{min_date}' AND log_date <= '{date_list[-1]}' {sat_cond}
     """
     df_logs = pd.read_sql_query(query_logs, conn)
+
+    fc_prov_where = (
+        "" if filter_prov == "ALL" else f"AND provinsi = '{filter_prov}'"
+    )
+    df_fc_count = pd.read_sql_query(
+        f"SELECT COUNT(*) as cnt FROM fire_risk_forecast WHERE risk_score >= 80 {fc_prov_where}",
+        conn,
+    )
+    summary_stats["ekstrim_fc"] = (
+        int(df_fc_count.iloc[0]["cnt"]) if not df_fc_count.empty else 0
+    )
+
     conn.close()
 
     if not df_logs.empty:
         rank_map = {"Tinggi": 4, "Sedang": 3, "Rendah": 2, "Padam": 1}
         df_logs["rank"] = df_logs["status"].map(rank_map)
-
         agg_logs = (
             df_logs.sort_values("rank", ascending=False)
             .groupby(["cluster_id", "log_date"])
@@ -1080,11 +1239,7 @@ def export_to_excel_multi(
         filter_sat=filter_sat,
         filter_source=filter_source,
     )
-    file_name = (
-        f"Laporan_Hotspot_{filter_prov}.xlsx"
-        if filter_prov != "ALL"
-        else "Laporan_Hotspot_MultiProvinsi.xlsx"
-    )
+    file_name = f"Laporan_Hotspot_{filter_prov}.xlsx"
     if not df.empty:
         export_df = df.drop(
             columns=["is_gambut", "status_terakhir"], errors="ignore"
@@ -1100,6 +1255,7 @@ def export_to_excel_multi(
 def scheduled_sync_multi():
     today_str = date.today().strftime("%Y-%m-%d")
     sync_hotspots_multi(today_str)
+    update_fire_risk_forecast_multi()
 
 
 def run_scheduler():
@@ -1111,7 +1267,7 @@ def run_scheduler():
 
 
 # ==========================================
-# 8. DASBOR WEB MULTI-PROVINSI (FLASK)
+# 8. DASBOR FLASK + LEAFLET.JS SPATIAL MAP
 # ==========================================
 app = Flask(__name__)
 
@@ -1120,7 +1276,10 @@ HTML_TEMPLATE = """
 <html lang="id">
 <head>
     <meta charset="UTF-8">
-    <title>Sistem Pemantauan Hotspot Multi-Provinsi (Jambi, Sumsel, Jatim)</title>
+    <title>Sistem Monitoring Hotspot & Peringatan Dini Karhutla</title>
+    <!-- Leaflet.js CDN -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px; background: #f8fafc; color: #1e293b; }
         .header { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 20px 28px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }
@@ -1130,20 +1289,23 @@ HTML_TEMPLATE = """
         
         .controls { display: flex; gap: 12px; align-items: center; background: white; padding: 14px 24px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; flex-wrap: wrap; }
         select { padding: 9px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 13px; font-weight: 600; background: white; color: #0f172a; }
-        .select-prov { background: #f0fdf4; border-color: #86efac; color: #166534; }
+        .select-prov { background: #f0fdf4; border-color: #86efac; color: #166534; font-size: 14px; }
         
         button, a.btn { padding: 9px 16px; border-radius: 8px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
         .btn-refresh { background: #0284c7; color: white; }
         .btn-excel { background: #16a34a; color: white; }
-        .btn-key { background: #64748b; color: white; }
         
         .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow-x: auto; margin-bottom: 24px; }
+        .card-header-title { font-size: 16px; font-weight: 700; color: #0f172a; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+        
+        #map { height: 480px; width: 100%; border-radius: 10px; border: 1px solid #e2e8f0; }
+        
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }
         th { background: #f8fafc; color: #475569; font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
         
         .badge { padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 11px; display: inline-block; text-align: center; }
-        .badge-tinggi { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+        .badge-tinggi, .badge-ekstrim { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
         .badge-sedang { background: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
         .badge-rendah { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
         .badge-padam { background: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
@@ -1152,44 +1314,30 @@ HTML_TEMPLATE = """
         .prov-jambi { background: #e0f2fe; color: #0284c7; }
         .prov-sumsel { background: #fef3c7; color: #d97706; }
         .prov-jatim { background: #dcfce7; color: #15803d; }
+        .prov-kalteng { background: #ffedd5; color: #ea580c; }
+        .prov-kaltim { background: #f3e8ff; color: #7e22ce; }
         
-        .kpa { color: #dc2626; font-weight: bold; }
-        .hl { color: #0284c7; font-weight: bold; }
-        .pbph { color: #059669; font-weight: bold; }
-        .gambut-ya { background: #ffedd5; color: #c2410c; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
-        .sensor-tag { background: #ede9fe; color: #6d28d9; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
-        
-        .summary-container { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
-        .summary-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; }
-        .summary-title { font-size: 16px; font-weight: 700; color: #0f172a; }
-        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; }
+        .summary-container { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 24px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
         .stat-card { padding: 16px; border-radius: 10px; border: 1px solid #e2e8f0; background: #fafafa; display: flex; flex-direction: column; justify-content: space-between; }
         .stat-val { font-size: 26px; font-weight: 800; margin-top: 4px; }
-        .stat-lbl { font-size: 12px; font-weight: 600; text-transform: uppercase; color: #64748b; }
-        
-        .stat-tinggi { background: #fef2f2; border-color: #fecaca; }
-        .stat-tinggi .stat-val { color: #dc2626; }
-        .stat-sedang { background: #fffbeb; border-color: #fde68a; }
-        .stat-sedang .stat-val { color: #d97706; }
-        .stat-rendah { background: #f0fdf4; border-color: #bbf7d0; }
-        .stat-rendah .stat-val { color: #16a34a; }
-        .stat-padam { background: #f8fafc; border-color: #e2e8f0; }
-        .stat-padam .stat-val { color: #64748b; }
-        .stat-konservasi { background: #fff1f2; border-color: #ffe4e6; }
-        .stat-konservasi .stat-val { color: #e11d48; }
-        .stat-gambut { background: #fff7ed; border-color: #ffedd5; }
-        .stat-gambut .stat-val { color: #ea580c; }
+        .stat-lbl { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #64748b; }
+        .stat-ekstrim { background: #fff1f2; border-color: #fda4af; }
+        .stat-ekstrim .stat-val { color: #e11d48; }
+
+        .legend-box { background: white; padding: 10px 14px; border-radius: 8px; box-shadow: 0 1px 5px rgba(0,0,0,0.2); font-size: 12px; line-height: 20px; }
+        .legend-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
     </style>
 </head>
 <body>
 
     <div class="header">
         <div>
-            <h1>Sistem Pemantauan Hotspot Multi-Provinsi</h1>
+            <h1>Sistem Monitoring Hotspot & Peringatan Dini Karhutla</h1>
             <div class="subtitle">
-                Cakupan Wilayah: <strong>Jambi, Sumatera Selatan, Jawa Timur</strong> | 
-                Jadwal: <span class="schedule-badge">07:00 & 18:00 WIB</span> | 
-                Status: <strong>{{ session_name }} ({{ ref_date }})</strong>
+                Cakupan: <strong>Jambi, Sumatera Selatan, Jawa Timur, Kalimantan Tengah, Kalimantan Timur</strong> | 
+                Sinkronisasi: <span class="schedule-badge">07:00 & 18:00 WIB</span> | 
+                Sesi: <strong>{{ session_name }} ({{ ref_date }})</strong>
             </div>
         </div>
         <div>
@@ -1198,40 +1346,172 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="controls">
-        <label><strong>Pilih Provinsi:</strong></label>
+        <label><strong>Pilih Wilayah:</strong></label>
         <select id="provSelect" class="select-prov" onchange="applyFilters()">
-            <option value="ALL" {% if current_prov == 'ALL' %}selected{% endif %}>🇮🇩 Semua Provinsi (Rekap Gabungan)</option>
+            <option value="ALL" {% if current_prov == 'ALL' %}selected{% endif %}>🇮🇩 Seluruh 5 Wilayah Provinsi</option>
             <option value="JAMBI" {% if current_prov == 'JAMBI' %}selected{% endif %}>📍 Provinsi Jambi</option>
             <option value="SUMSEL" {% if current_prov == 'SUMSEL' %}selected{% endif %}>📍 Provinsi Sumatera Selatan</option>
             <option value="JATIM" {% if current_prov == 'JATIM' %}selected{% endif %}>📍 Provinsi Jawa Timur</option>
+            <option value="KALTENG" {% if current_prov == 'KALTENG' %}selected{% endif %}>📍 Provinsi Kalimantan Tengah</option>
+            <option value="KALTIM" {% if current_prov == 'KALTIM' %}selected{% endif %}>📍 Provinsi Kalimantan Timur</option>
         </select>
 
         <label><strong>Sumber Feed:</strong></label>
         <select id="sourceSelect" onchange="applyFilters()">
-            <option value="ALL_DATA" {% if current_source == 'ALL_DATA' %}selected{% endif %}>🌐 Seluruh Lanskap (HK, HL, HP/PBPH, APL)</option>
-            <option value="GITHUB_HK" {% if current_source == 'GITHUB_HK' %}selected{% endif %}>🌲 Khusus Hutan Konservasi (TN/CA/SM/Tahura)</option>
+            <option value="ALL_DATA" {% if current_source == 'ALL_DATA' %}selected{% endif %}>🌐 Seluruh Lanskap (HK, HL, PBPH, APL)</option>
+            <option value="GITHUB_HK" {% if current_source == 'GITHUB_HK' %}selected{% endif %}>🌲 Khusus Kawasan Konservasi (TN/CA/SM/Tahura)</option>
         </select>
 
-        <label><strong>Satelit:</strong></label>
+        <label><strong>Sensor:</strong></label>
         <select id="satSelect" onchange="applyFilters()">
-            <option value="ALL" {% if current_sat == 'ALL' %}selected{% endif %}>🌐 Semua Satelit (Gabungan)</option>
+            <option value="ALL" {% if current_sat == 'ALL' %}selected{% endif %}>Semua Sensor (NOAA/SNPP/Terra/Aqua)</option>
             <option value="NOAA" {% if current_sat == 'NOAA' %}selected{% endif %}>🛰️ NOAA-20 / SNPP (375m)</option>
             <option value="TERRA" {% if current_sat == 'TERRA' %}selected{% endif %}>🛰️ Terra / Aqua (1km)</option>
         </select>
 
-        <label><strong>Status:</strong></label>
-        <select id="statusSelect" onchange="applyFilters()">
-            <option value="ALL" {% if current_status == 'ALL' %}selected{% endif %}>Semua Status</option>
-            <option value="AKTIF" {% if current_status == 'AKTIF' %}selected{% endif %}>🔥 Titik Aktif Saja</option>
-            <option value="TINGGI" {% if current_status == 'TINGGI' %}selected{% endif %}>🔴 Hanya Risiko Tinggi</option>
-            <option value="SEDANG_RENDAH" {% if current_status == 'SEDANG_RENDAH' %}selected{% endif %}>🟡/🟢 Sedang & Rendah</option>
-        </select>
-
         <button class="btn btn-refresh" onclick="refreshData()">🔄 Sinkronisasi Sekarang</button>
-        <button class="btn btn-key" onclick="updateApiKey()">🔑 NASA Key</button>
     </div>
 
+    <!-- KARTU STATISTIK UTAMA -->
+    <div class="summary-container">
+        <div class="summary-grid">
+            <div class="stat-card">
+                <span class="stat-lbl">Total Titik Hotspot Aktif</span>
+                <span class="stat-val" style="color: #0284c7;">{{ stats['aktif'] }}</span>
+            </div>
+            <div class="stat-card" style="background:#fef2f2; border-color:#fecaca;">
+                <span class="stat-lbl">Hotspot Risiko Tinggi (≥80%)</span>
+                <span class="stat-val" style="color:#dc2626;">{{ stats['tinggi'] }}</span>
+            </div>
+            <div class="stat-card" style="background:#fffbeb; border-color:#fde68a;">
+                <span class="stat-lbl">Hotspot Sedang (30-79%)</span>
+                <span class="stat-val" style="color:#d97706;">{{ stats['sedang'] }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-lbl">Di Hutan Konservasi (TN/SM)</span>
+                <span class="stat-val" style="color:#e11d48;">{{ stats['konservasi'] }}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-lbl">Di Lahan Rawa Gambut</span>
+                <span class="stat-val" style="color:#ea580c;">{{ stats['gambut'] }}</span>
+            </div>
+            <div class="stat-card stat-ekstrim">
+                <span class="stat-lbl">Peringatan Ekstrim H-5</span>
+                <span class="stat-val">{{ stats['ekstrim_fc'] }}</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- PETA SPASIAL LEAFLET.JS -->
     <div class="card">
+        <div class="card-header-title">
+            <span>🗺️ Visualisasi Spasial Sebaran Hotspot & Sentinel Kerawanan H-5</span>
+            <span style="font-size:12px; color:#64748b; font-weight:normal;">Peta diperbarui otomatis sesuai wilayah filter</span>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <!-- REKAP POTENSI PER PROVINSI -->
+    <div class="card" style="border-top: 4px solid #0284c7;">
+        <div class="card-header-title">
+            📊 Rekapitulasi Matriks Status Potensi Karhutla Antar-Provinsi (5 Provinsi)
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Provinsi</th>
+                    <th>Status Siaga Utama</th>
+                    <th>Titik Sentinel Ekstrim (H-5)</th>
+                    <th>Titik Sentinel Siaga Tinggi</th>
+                    <th>Titik Rawan Gambut</th>
+                    <th>Jumlah Hotspot Terdeteksi</th>
+                    <th>Rekomendasi Operasional Lapangan</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in prov_summary %}
+                <tr>
+                    <td><span class="prov-tag prov-{{ p['provinsi']|lower }}">{{ p['provinsi'] }}</span></td>
+                    <td><span class="badge {{ p['badge_class'] }}">{{ p['status_label'] }}</span></td>
+                    <td><b>{{ p['ekstrim_cnt'] }} Titik</b></td>
+                    <td>{{ p['tinggi_cnt'] }} Titik</td>
+                    <td>{% if p['gambut_cnt'] > 0 %}<span style="color:#ea580c; font-weight:700;">{{ p['gambut_cnt'] }} Titik</span>{% else %}-{% endif %}</td>
+                    <td><b>{{ p['hs_count'] }} Titik</b></td>
+                    <td style="font-size:12px; color:#475569;">
+                        {% if p['provinsi'] == 'KALTENG' %}
+                            Operasi TMC, pembasahan kubah gambut Sebangau & Eks-PLG, siaga water bombing.
+                        {% elif p['provinsi'] == 'SUMSEL' %}
+                            Patroli darat konsesi HTI OKI, monitoring tinggi muka air gambut Padang Sugihan.
+                        {% elif p['provinsi'] == 'JAMBI' %}
+                            Aktivasi sekat kanal TN Berbak, pengawasan kawasan trans-boundary Hutan Harapan.
+                        {% elif p['provinsi'] == 'KALTIM' %}
+                            Pembersihan sekat bakar batas IKN, monitoring areal mineral terbuka TN Kutai.
+                        {% else %}
+                            Pembersihan serasah savana TN Baluran & pencegahan kebakaran dedaunan KPH Jatim.
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- TABEL PERINGATAN DINI H-5 -->
+    <div class="card" style="border-left: 5px solid #e11d48;">
+        <div class="card-header-title">
+            ⚠️ Detail Peringatan Dini Cuaca & Prediksi Kerawanan 5 Hari ke Depan (Open-Meteo Ensemble)
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Provinsi</th>
+                    <th>Titik Sentinel / Kawasan Kritis</th>
+                    <th>Koordinat</th>
+                    <th>Tanggal Proyeksi</th>
+                    <th>Suhu Maks</th>
+                    <th>Kelembapan Min</th>
+                    <th>Prediksi Hujan</th>
+                    <th>Angin Maks</th>
+                    <th>Tipe Lahan</th>
+                    <th>Indeks Risiko</th>
+                    <th>Tingkat Ancaman</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for f in forecasts %}
+                <tr>
+                    <td><span class="prov-tag prov-{{ f['provinsi']|lower }}">{{ f['provinsi'] }}</span></td>
+                    <td><b>{{ f['nama_kawasan'] }}</b></td>
+                    <td>{{ "%.3f"|format(f['latitude']) }}, {{ "%.3f"|format(f['longitude']) }}</td>
+                    <td>{{ f['forecast_date'] }}</td>
+                    <td>{{ f['temp_max'] }}°C</td>
+                    <td>{{ f['rh_min'] }}%</td>
+                    <td>{{ f['precip_sum'] }} mm</td>
+                    <td>{{ f['wind_max'] }} km/j</td>
+                    <td>{% if f['is_gambut'] == 1 %}<span style="color:#ea580c; font-weight:700;">Gambut</span>{% else %}Mineral{% endif %}</td>
+                    <td><b>{{ f['risk_score'] }}</b></td>
+                    <td>
+                        {% if f['risk_category'] == 'Ekstrim' %}
+                            <span class="badge badge-ekstrim">🔥 EKSTRIM</span>
+                        {% elif f['risk_category'] == 'Tinggi' %}
+                            <span class="badge badge-tinggi">SIAGA TINGGI</span>
+                        {% elif f['risk_category'] == 'Sedang' %}
+                            <span class="badge badge-sedang">WASPADA</span>
+                        {% else %}
+                            <span class="badge badge-rendah">AMAN</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- TABEL RIWAYAT HOTSPOT 10 HARI -->
+    <div class="card">
+        <div class="card-header-title">
+            🛰️ Matriks Riwayat Titik Hotspot 10 Hari Terakhir (Multi-Satelit)
+        </div>
         <table>
             <thead>
                 <tr>
@@ -1252,25 +1532,13 @@ HTML_TEMPLATE = """
                 {% for row in rows %}
                 <tr>
                     <td>{{ row['No'] }}</td>
-                    <td>
-                        <span class="prov-tag prov-{{ row['provinsi']|lower }}">{{ row['provinsi'] }}</span>
-                    </td>
+                    <td><span class="prov-tag prov-{{ row['provinsi']|lower }}">{{ row['provinsi'] }}</span></td>
                     <td><b>{{ "%.4f"|format(row['latitude']) }}, {{ "%.4f"|format(row['longitude']) }}</b></td>
                     <td>{{ row['kabupaten'] }}</td>
-                    <td>
-                        <span class="{% if 'KPA' in row['fungsi_kawasan'] or 'KSA' in row['fungsi_kawasan'] %}kpa{% elif 'Hutan Lindung' in row['fungsi_kawasan'] %}hl{% elif 'PBPH' in row['fungsi_kawasan'] or 'Perhutani' in row['fungsi_kawasan'] %}pbph{% endif %}">
-                            {{ row['fungsi_kawasan'] }}
-                        </span>
-                    </td>
-                    <td>{{ row['nama_kawasan'] }}</td>
-                    <td>
-                        {% if row['is_gambut_label'] == 'Ya' %}
-                            <span class="gambut-ya">Gambut</span>
-                        {% else %}
-                            <span style="color:#94a3b8;">Mineral</span>
-                        {% endif %}
-                    </td>
-                    <td><span class="sensor-tag">{{ row['sensor_terdeteksi'] }}</span></td>
+                    <td>{{ row['fungsi_kawasan'] }}</td>
+                    <td><b>{{ row['nama_kawasan'] }}</b></td>
+                    <td>{% if row['is_gambut_label'] == 'Ya' %}<span style="color:#ea580c; font-weight:700;">Gambut</span>{% else %}Mineral{% endif %}</td>
+                    <td>{{ row['sensor_terdeteksi'] }}</td>
                     {% for d in date_columns %}
                         <td>
                             {% set st = row[d] %}
@@ -1287,79 +1555,27 @@ HTML_TEMPLATE = """
                     {% endfor %}
                 </tr>
                 {% endfor %}
-                {% if rows|length == 0 %}
-                <tr>
-                    <td colspan="{{ 8 + date_columns|length }}" style="text-align:center; padding: 40px; color: #94a3b8;">
-                        Tidak ada titik hotspot yang terpantau pada wilayah dan filter yang dipilih.
-                    </td>
-                </tr>
-                {% endif %}
             </tbody>
         </table>
     </div>
 
-    <div class="summary-container">
-        <div class="summary-header">
-            <div class="summary-title">
-                📊 Ringkasan Status Hotspot 
-                <span style="font-weight:normal; font-size:13px; color:#64748b;">
-                    (Wilayah: <b>{{ current_prov }}</b> | Rujukan: 
-                    {% if current_sat == 'ALL' %}<b>Semua Satelit</b>
-                    {% elif current_sat == 'NOAA' %}<b>NOAA-20/SNPP (375m)</b>
-                    {% else %}<b>Terra/Aqua (1km)</b>{% endif %})
-                </span>
-            </div>
-        </div>
-
-        <div class="summary-grid">
-            <div class="stat-card">
-                <span class="stat-lbl">Total Titik Aktif</span>
-                <span class="stat-val" style="color: #0284c7;">{{ stats['aktif'] }}</span>
-            </div>
-            <div class="stat-card stat-tinggi">
-                <span class="stat-lbl">Tinggi / High (≥80%)</span>
-                <span class="stat-val">{{ stats['tinggi'] }}</span>
-            </div>
-            <div class="stat-card stat-sedang">
-                <span class="stat-lbl">Sedang / Medium (30-79%)</span>
-                <span class="stat-val">{{ stats['sedang'] }}</span>
-            </div>
-            <div class="stat-card stat-rendah">
-                <span class="stat-lbl">Rendah / Low (&lt;30%)</span>
-                <span class="stat-val">{{ stats['rendah'] }}</span>
-            </div>
-            <div class="stat-card stat-padam">
-                <span class="stat-lbl">Padam (Hari Ini)</span>
-                <span class="stat-val">{{ stats['padam'] }}</span>
-            </div>
-            <div class="stat-card stat-konservasi">
-                <span class="stat-lbl">Di Kawasan Konservasi</span>
-                <span class="stat-val">{{ stats['konservasi'] }}</span>
-            </div>
-            <div class="stat-card stat-gambut">
-                <span class="stat-lbl">Di Lahan Gambut</span>
-                <span class="stat-val">{{ stats['gambut'] }}</span>
-            </div>
-        </div>
-    </div>
-
+    <!-- SCRIPT LEAFLET & INTERAKSI -->
     <script>
         function applyFilters() {
             const prov = document.getElementById('provSelect').value;
             const source = document.getElementById('sourceSelect').value;
             const sat = document.getElementById('satSelect').value;
-            const status = document.getElementById('statusSelect').value;
-            window.location.href = '/?prov=' + prov + '&source=' + source + '&sat=' + sat + '&status=' + status;
+            window.location.href = '/?prov=' + prov + '&source=' + source + '&sat=' + sat;
         }
 
         function refreshData() {
             const btn = document.querySelector('.btn-refresh');
-            btn.innerHTML = '⏳ Menarik Data...';
+            btn.innerHTML = '⏳ Menarik Data Cuaca & Satelit...';
             btn.disabled = true;
             fetch('/api/sync')
                 .then(r => r.json())
                 .then(res => {
-                    alert('Data multi-provinsi berhasil disinkronkan (' + res.session + ')!');
+                    alert('Data hotspot dan prediksi cuaca 5 provinsi berhasil disinkronkan!');
                     window.location.reload();
                 })
                 .catch(e => {
@@ -1369,21 +1585,90 @@ HTML_TEMPLATE = """
                 });
         }
 
-        function updateApiKey() {
-            const current = prompt("Masukkan NASA FIRMS MAP_KEY Anda:");
-            if (current) {
-                fetch('/api/set-key', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({nasa_key: current.trim()})
-                })
-                .then(r => r.json())
-                .then(res => {
-                    alert("NASA Map Key berhasil diperbarui!");
-                    refreshData();
-                });
+        // Inisialisasi Peta Leaflet.js
+        const mapCenter = {{ map_center|tojson }};
+        const map = L.map('map').setView([mapCenter[0], mapCenter[1]], mapCenter[2]);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 18,
+            attribution: '© OpenStreetMap contributors | Karhutla Early Warning'
+        }).addTo(map);
+
+        const hotspotData = {{ rows|tojson }};
+        const forecastData = {{ forecasts|tojson }};
+
+        // Render Hotspots (Circle Markers)
+        hotspotData.forEach(pt => {
+            const isPadam = pt.status_terakhir === 'Padam';
+            const color = isPadam ? '#94a3b8' : (pt.status_terakhir === 'Tinggi' ? '#dc2626' : (pt.status_terakhir === 'Sedang' ? '#d97706' : '#16a34a'));
+            const circle = L.circleMarker([pt.latitude, pt.longitude], {
+                radius: isPadam ? 5 : 8,
+                fillColor: color,
+                color: '#ffffff',
+                weight: 1.5,
+                opacity: 1,
+                fillOpacity: 0.85
+            }).addTo(map);
+
+            circle.bindPopup(`
+                <div style="font-size:12px;">
+                    <strong style="color:${color}; font-size:13px;">Hotspot: ${pt.status_terakhir}</strong><br>
+                    <b>Kawasan:</b> ${pt.nama_kawasan}<br>
+                    <b>Kabupaten:</b> ${pt.kabupaten} (${pt.provinsi})<br>
+                    <b>Fungsi:</b> ${pt.fungsi_kawasan}<br>
+                    <b>Tipe Lahan:</b> ${pt.is_gambut_label === 'Ya' ? 'Rawa Gambut' : 'Tanah Mineral'}<br>
+                    <b>Sensor:</b> ${pt.sensor_terdeteksi}
+                </div>
+            `);
+        });
+
+        // Render Sentinel Forecast (Custom Markers)
+        const sentinelRendered = new Set();
+        forecastData.forEach(fc => {
+            const key = fc.latitude + '_' + fc.longitude;
+            if (!sentinelRendered.has(key)) {
+                sentinelRendered.add(key);
+                const isEkstrim = fc.risk_category === 'Ekstrim';
+                const pulseColor = isEkstrim ? '#dc2626' : '#ea580c';
+                
+                const marker = L.circleMarker([fc.latitude, fc.longitude], {
+                    radius: 12,
+                    fillColor: pulseColor,
+                    color: '#ffffff',
+                    weight: 2,
+                    dashArray: '3, 3',
+                    fillOpacity: 0.4
+                }).addTo(map);
+
+                marker.bindPopup(`
+                    <div style="font-size:12px;">
+                        <span style="background:${pulseColor}; color:white; padding:2px 6px; border-radius:4px; font-weight:bold;">
+                            Sentinel H-5: ${fc.risk_category}
+                        </span><br>
+                        <b style="font-size:13px; margin-top:4px; display:inline-block;">${fc.nama_kawasan}</b><br>
+                        <b>Provinsi:</b> ${fc.provinsi}<br>
+                        <b>Indeks Risiko:</b> ${fc.risk_score} / 100<br>
+                        <b>Prakiraan Suhu / RH:</b> ${fc.temp_max}°C / ${fc.rh_min}%<br>
+                        <b>Proyeksi Hujan:</b> ${fc.precip_sum} mm
+                    </div>
+                `);
             }
-        }
+        });
+
+        // Tambah Legenda Peta
+        const legend = L.control({position: 'bottomright'});
+        legend.onAdd = function (map) {
+            const div = L.DomUtil.create('div', 'legend-box');
+            div.innerHTML = `
+                <b>Legenda Spasial</b><br>
+                <span class="legend-dot" style="background:#dc2626;"></span> Hotspot Risiko Tinggi<br>
+                <span class="legend-dot" style="background:#d97706;"></span> Hotspot Risiko Sedang<br>
+                <span class="legend-dot" style="background:#94a3b8;"></span> Hotspot Padam (Riwayat)<br>
+                <span class="legend-dot" style="background:#ea580c; border:1px dashed #ffffff;"></span> Titik Sentinel Prediksi H-5
+            `;
+            return div;
+        };
+        legend.addTo(map);
     </script>
 </body>
 </html>
@@ -1396,8 +1681,10 @@ def index():
     source = request.args.get("source", "ALL_DATA")
     sat = request.args.get("sat", "ALL")
     status = request.args.get("status", "ALL")
+
     ref_d, session_name = get_effective_date_and_session()
     ref_str = ref_d.strftime("%Y-%m-%d")
+
     df, date_list, stats = generate_table_multi(
         ref_d,
         filter_prov=prov,
@@ -1406,16 +1693,22 @@ def index():
         filter_source=source,
     )
     rows = df.to_dict(orient="records") if not df.empty else []
+    forecasts = get_forecast_summary_multi(filter_prov=prov)
+    prov_summary = get_provincial_potential_summary()
+    map_center = PROV_CENTERS.get(prov, PROV_CENTERS["ALL"])
+
     return render_template_string(
         HTML_TEMPLATE,
         rows=rows,
+        forecasts=forecasts,
+        prov_summary=prov_summary,
+        map_center=map_center,
         date_columns=date_list,
         ref_date=ref_str,
         session_name=session_name,
         current_prov=prov,
         current_source=source,
         current_sat=sat,
-        current_status=status,
         stats=stats,
     )
 
@@ -1425,19 +1718,10 @@ def api_sync():
     ref_d, session_name = get_effective_date_and_session()
     ref_str = ref_d.strftime("%Y-%m-%d")
     sync_hotspots_multi(ref_str)
+    update_fire_risk_forecast_multi()
     return jsonify(
         {"status": "ok", "effective_date": ref_str, "session": session_name}
     )
-
-
-@app.route("/api/set-key", methods=["POST"])
-def api_set_key():
-    data = request.get_json() or {}
-    key = data.get("nasa_key")
-    if key:
-        set_nasa_key(key)
-        return jsonify({"status": "updated"})
-    return jsonify({"status": "error"}), 400
 
 
 @app.route("/download-excel")
@@ -1454,14 +1738,14 @@ def download_excel():
         return send_file(out_file, as_attachment=True, download_name=out_file)
     return "File Excel belum tersedia", 404
 
+
 # ==========================================
-# 9. INISIALISASI OTOMATIS (LOKAL & SERVER CLOUD)
+# 9. INISIALISASI OTOMATIS (LOKAL & CLOUD)
 # ==========================================
-# Jalankan inisialisasi database dan seed data secara langsung agar Gunicorn mengeksekusinya
 init_db()
 seed_historical_multi()
+update_fire_risk_forecast_multi()
 
-# Jalankan background scheduler untuk penarikan 07:00 & 18:00 WIB
 t = threading.Thread(target=run_scheduler, daemon=True)
 t.start()
 
@@ -1474,4 +1758,3 @@ except Exception:
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
