@@ -887,26 +887,28 @@ HTML_TEMPLATE = """
             ⚠️ Detail Peringatan Dini Cuaca, 3 Elemen Pembakar & Keyakinan Hotspot 5 Hari ke Depan
         </div>
         <table>
-            <thead>
-                <tr>
-                    <th>Provinsi</th>
-                    <th>Titik Sentinel / Kawasan Kritis</th>
-                    <th>Tanggal Proyeksi</th>
-                    <th>Keyakinan Timbul Hotspot (%)</th>
-                    <th>Hari Tanpa Hujan (HTH)</th>
-                    <th>1. Suhu Puncak</th>
-                    <th>2. Ketersediaan Bahan Bakar</th>
-                    <th>3. Desikasi (RH / Angin)</th>
-                    <th>Tipe Lahan</th>
-                    <th>Tingkat Ancaman</th>
-                </tr>
+          <thead>
+            <tr>
+              <th>Provinsi</th>
+              <th>Titik Sentinel / Kawasan Kritis</th>
+              <th>Koordinat Acuan</th>
+              <th>Tanggal Proyeksi</th>
+              <th>Keyakinan Timbul Hotspot (%)</th>
+              <th>Hari Tanpa Hujan (HTH)</th>
+              <th>1. Suhu Puncak</th>
+              <th>2. Ketersediaan Bahan Bakar</th>
+              <th>3. Desikasi (RH / Angin)</th>
+              <th>Tipe Lahan</th>
+              <th>Tingkat Ancaman</th>
+            </tr>
             </thead>
             <tbody>
-                {% for f in forecasts %}
-                <tr>
-                    <td><span class="prov-tag prov-{{ f['provinsi']|lower }}">{{ f['provinsi'] }}</span></td>
-                    <td><b>{{ f['nama_kawasan'] }}</b></td>
-                    <td>{{ f['forecast_date'] }}</td>
+           {% for f in forecasts %}
+           <tr>
+             <td><span class="prov-tag prov-{{ f['provinsi']|lower }}">{{ f['provinsi'] }}</span></td>
+             <td><b>{{ f['nama_kawasan'] }}</b></td>
+             <td><code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-weight:bold;">{{ "%.4f"|format(f['latitude']) }}, {{ "%.4f"|format(f['longitude']) }}</code></td>
+             <td>{{ f['forecast_date'] }}</td>
                     <td>
                         <span style="font-size:14px; font-weight:800; color:{% if f['confidence_pct'] >= 80 %}#dc2626{% elif f['confidence_pct'] >= 60 %}#d97706{% else %}#16a34a{% endif %};">
                             {{ f['confidence_pct'] }}%
@@ -1086,23 +1088,26 @@ HTML_TEMPLATE = """
                 });
 
                 marker.bindPopup(`
-                    <div style="font-size:12px; min-width:245px;">
-                        <span style="background:${pulseColor}; color:white; padding:2px 8px; border-radius:4px; font-weight:bold;">
-                            🔥 Potensi H-5: ${fc.risk_category}
-                        </span><br>
-                        <div style="margin: 6px 0 2px 0;">
-                            <b>Keyakinan Hotspot:</b> <span style="font-size:14px; font-weight:bold; color:${pulseColor};">${fc.confidence_pct}%</span>
-                            <div style="font-size:11px; color:#64748b;">${fc.confidence_label}</div>
-                        </div>
-                        <b style="font-size:13px; display:inline-block; margin-top:4px;">${fc.nama_kawasan}</b><br>
-                        <span style="color:#64748b;">${fc.provinsi} | ${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
-                        <hr style="border:0; border-top:1px solid #e2e8f0; margin:6px 0;">
-                        <b>Analisis 3 Elemen Pembakar:</b><br>
-                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_max >= 34 ? '<span style="color:red; font-weight:bold;">Kritis</span>' : 'Normal'})<br>
-                        🍂 <b>2. Bahan Bakar / HTH:</b> ${fc.dry_days_projected} Hari Kering (${fc.precip_sum} mm)<br>
-                        💨 <b>3. Desikasi (RH & Angin):</b> RH ${fc.rh_min}% | Angin ${fc.wind_max} km/j
-                    </div>
-                `);
+    <div style="font-size:12px; min-width:245px;">
+        <span style="background:${pulseColor}; color:white; padding:2px 8px; border-radius:4px; font-weight:bold;">
+            🔥 Potensi H-5: ${fc.risk_category}
+        </span><br>
+        <div style="margin: 6px 0 2px 0;">
+            <b>Keyakinan Hotspot:</b> <span style="font-size:14px; font-weight:bold; color:${pulseColor};">${fc.confidence_pct}%</span>
+            <div style="font-size:11px; color:#64748b;">${fc.confidence_label}</div>
+        </div>
+        <b style="font-size:13px; display:inline-block; margin-top:4px;">${fc.nama_kawasan}</b><br>
+        <span style="color:#0f172a; font-weight:bold; background:#f1f5f9; padding:1px 4px; border-radius:3px;">
+            📍 ${Number(fc.latitude).toFixed(4)}, ${Number(fc.longitude).toFixed(4)}
+        </span><br>
+        <span style="color:#64748b;">${fc.provinsi} | ${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
+        <hr style="border:0; border-top:1px solid #e2e8f0; margin:6px 0;">
+        <b>Analisis 3 Elemen Pembakar:</b><br>
+        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_max >= 34 ? '<span style="color:red; font-weight:bold;">Kritis</span>' : 'Normal'})<br>
+        🍂 <b>2. Bahan Bakar / HTH:</b> ${fc.dry_days_projected} Hari Kering (${fc.precip_sum} mm)<br>
+        💨 <b>3. Desikasi (RH & Angin):</b> RH ${fc.rh_min}% | Angin ${fc.wind_max} km/j
+    </div>
+`);
                 forecastLayer.addLayer(marker);
             }
         });
