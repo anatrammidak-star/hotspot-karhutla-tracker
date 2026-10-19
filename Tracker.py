@@ -1276,21 +1276,24 @@ HTML_TEMPLATE = """
         }
 
         function refreshData() {
-            const btn = document.querySelector('.btn-refresh');
-            btn.innerHTML = '⏳ Menarik Data Cuaca & Satelit...';
-            btn.disabled = true;
-            fetch('/api/sync')
-                .then(r => r.json())
-                .then(res => {
-                    alert('Data hotspot dan prediksi cuaca 5 provinsi berhasil disinkronkan!');
-                    window.location.reload();
-                })
-                .catch(e => {
-                    alert('Gagal menyinkronkan data.');
-                    btn.innerHTML = '🔄 Sinkronisasi Sekarang';
-                    btn.disabled = false;
-                });
-        }
+    const btn = document.querySelector('.btn-refresh');
+    btn.innerHTML = '⏳ Memulai Sinkronisasi...';
+    btn.disabled = true;
+    fetch('/api/sync')
+        .then(r => r.json())
+        .then(res => {
+            btn.innerHTML = '⏳ Mengambil Data Cuaca & Satelit (5-10 dtk)...';
+            setTimeout(() => {
+                alert('Proses sinkronisasi data hotspot & cuaca 5 provinsi selesai!');
+                window.location.reload();
+            }, 8000);
+        })
+        .catch(e => {
+            alert('Gagal menyinkronkan data.');
+            btn.innerHTML = '🔄 Sinkronisasi Hotspot & Cuaca';
+            btn.disabled = false;
+        });
+}
 
         const mapCenter = {{ map_center|tojson }};
         const map = L.map('map').setView([mapCenter[0], mapCenter[1]], mapCenter[2]);
