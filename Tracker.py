@@ -1457,9 +1457,27 @@ def index():
 def api_sync():
     ref_d, session_name = get_effective_date_and_session()
     ref_str = ref_d.strftime("%Y-%m-%d")
-    sync_hotspots_multi(ref_str)
-    update_fire_risk_forecast_multi()
-    return jsonify({"status": "ok", "effective_date": ref_str, "session": session_name})
+
+    # Jalankan proses sinkronisasi di latar belakang agar request web tidak timeout
+    def run_background_sync():
+        try:
+            sync_hotspots_multi(ref_str)
+        except Exception as e:
+            print(f"Error sync hotspots: {e}")
+        try:
+            update_fire_risk_forecast_multi()
+        except Exception as e:
+            print(f"Error sync weather: {e}")
+
+    sync_thread = threading.Thread(target=run_background_sync)
+    sync_thread.start()
+
+    return jsonify({
+        "status": "ok",
+        "effective_date": ref_str,
+        "session": session_name,
+        "message": "Sinkronisasi dimulai di latar belakang"
+    })
 
 
 @app.route("/download-excel")
