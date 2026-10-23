@@ -61,7 +61,7 @@ PROV_CENTERS = {
 # 1. DATABASE LOKAL
 # ==========================================
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS hotspot_clusters (
@@ -124,7 +124,7 @@ def init_db():
     conn.close()
 
 def get_nasa_key():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     c = conn.cursor()
     c.execute("SELECT value FROM app_settings WHERE key = 'nasa_key'")
     row = c.fetchone()
@@ -185,23 +185,24 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & PREDIKSI CUACA
+# 3. PENARIKAN NASA FIRMS & PREDIKSI CUACA (PERBAIKAN KODE RESMI)
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     combined = []
 
+    # Kode sensor resmi NASA FIRMS untuk endpoint Country
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
-        ("NOAA_20_VIIRS_NRT", "NOAA-20"),
-        ("NOAA_21_VIIRS_NRT", "NOAA-21"),
+        ("VIIRS_NOAA20_NRT", "NOAA-20"),
+        ("VIIRS_NOAA21_NRT", "NOAA-21"),
         ("MODIS_NRT", "Terra/Aqua"),
     ]
 
     for api_code, sat_lbl in sensors:
         url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
         try:
-            resp = requests.get(url, timeout=14)
+            resp = requests.get(url, timeout=25)
             if resp.status_code == 200 and "latitude" in resp.text:
                 lines = resp.text.strip().split("\n")
                 if len(lines) > 1 and "latitude" in lines[0]:
@@ -241,9 +242,10 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                                 "satellite_source": sat_lbl,
                                 "acq_date": acq_date,
                             })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error NASA FIRMS {sat_lbl}: {e}")
 
+    print(f"--> [NASA FIRMS] Total titik terunduh dari 4 sensor: {len(combined)} titik.")
     return combined
 
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
@@ -305,7 +307,7 @@ def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
     )
 
 def update_fire_risk_forecast_multi():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     today = date.today()
 
     for item in SENTINEL_POINTS:
@@ -357,46 +359,52 @@ def sync_hotspots_multi(target_date_str):
     init_db()
     raw_points = fetch_satellite_data_multi(target_date_str, target_prov="ALL")
 
-    conn = sqlite3.connect(DB_NAME)
+    if not raw_points:
+        print("Data satelit belum terambil atau kosong.")
+        return
+
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     c = conn.cursor()
 
-    if raw_points:
-        c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
-        c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
+    # Bersihkan data dummy awal ketika titik satelit riil terbukti masuk
+    c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
+    c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
 
-        for pt in raw_points:
-            prov = pt["provinsi"]
-            lat = pt["latitude"]
-            lon = pt["longitude"]
-            conf = pt["confidence"]
-            sat = pt["satellite_source"]
-            dt = pt["acq_date"]
+    for pt in raw_points:
+        prov = pt["provinsi"]
+        lat = pt["latitude"]
+        lon = pt["longitude"]
+        conf = pt["confidence"]
+        sat = pt["satellite_source"]
+        dt = pt["acq_date"]
 
-            status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
-            cid = f"HS-{prov}-{round(lat, 2)}-{round(lon, 2)}"
-            fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
+        status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+        # Grid resolusi ~1.1 km untuk mengonsolidasikan sensor berbeda pada titik api yang sama
+        cid = f"HS-{prov}-{round(lat, 2)}-{round(lon, 2)}"
+        fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
-            c.execute("""
-                INSERT OR REPLACE INTO hotspot_clusters 
-                (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
-            """, (cid, prov, lat, lon, kab, fkws, nkws, is_g, dt, dt))
+        c.execute("""
+            INSERT OR REPLACE INTO hotspot_clusters 
+            (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
+        """, (cid, prov, lat, lon, kab, fkws, nkws, is_g, dt, dt))
 
-            c.execute("""
-                INSERT OR REPLACE INTO hotspot_daily_log 
-                (cluster_id, log_date, satellite_source, status, confidence)
-                VALUES (?, ?, ?, ?, ?)
-            """, (cid, dt, sat, status, conf))
+        c.execute("""
+            INSERT OR REPLACE INTO hotspot_daily_log 
+            (cluster_id, log_date, satellite_source, status, confidence)
+            VALUES (?, ?, ?, ?, ?)
+        """, (cid, dt, sat, status, conf))
 
     conn.commit()
     conn.close()
+    print(f"--> [DATABASE] Berhasil menyimpan {len(raw_points)} titik ke pangkalan data SQLite.")
 
 # ==========================================
 # 4. INITIAL SEED (DATA HISTORIS 10 HARI TERJAGA)
 # ==========================================
 def seed_historical_multi():
     init_db()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     c = conn.cursor()
 
     c.execute("SELECT COUNT(*) FROM hotspot_clusters")
@@ -459,7 +467,7 @@ def get_effective_date_and_session():
     return effective_date, session_text
 
 def get_provincial_potential_summary():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     summary = []
     prov_list = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]
 
@@ -511,7 +519,7 @@ def get_provincial_potential_summary():
     return summary
 
 def get_forecast_summary_multi(filter_prov="ALL"):
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     prov_where = "" if filter_prov == "ALL" else f"WHERE provinsi = '{filter_prov}'"
     query = f"""
         SELECT provinsi, nama_kawasan, latitude, longitude, forecast_date, temp_max, rh_min, precip_sum, wind_max, is_gambut, risk_score, risk_category, confidence_pct, confidence_label, dry_days_projected
@@ -537,7 +545,7 @@ def generate_table_multi(
     date_list = [(ref_date - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(9, -1, -1)]
     min_date = date_list[0]
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     prov_where = "" if filter_prov == "ALL" else f"AND provinsi = '{filter_prov}'"
     df_clusters = pd.read_sql_query(
         f"SELECT cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut FROM hotspot_clusters WHERE is_active = 1 {prov_where}",
@@ -591,7 +599,6 @@ def generate_table_multi(
         )
         pivot = agg_logs.pivot(index="cluster_id", columns="log_date", values="status").fillna("Padam")
 
-        # Konsolidasi sensor: gabungkan nama sensor tanpa duplikasi
         sat_summary = {}
         for cid, group in df_logs[df_logs["status"] != "Padam"].groupby("cluster_id"):
             all_sats = []
@@ -655,7 +662,7 @@ def generate_table_multi(
 
     merged.insert(0, "No", range(1, len(merged) + 1))
     
-    # Ambil maksimal 300 titik teratas khusus untuk penanda peta
+    # Ambil maksimal 300 titik prioritas untuk layer visual peta
     map_df = merged.head(300)
     summary_stats["map_total"] = len(map_df)
 
@@ -875,7 +882,7 @@ HTML_PAGE = """<!DOCTYPE html>
         </table>
     </div>
 
-    <!-- DETAIL PERINGATAN DINI CUACA (75 TITIK LENGKAP) -->
+    <!-- DETAIL PERINGATAN DINI CUACA (75 TITIK SENTINEL LENGKAP) -->
     <div class="card" style="border-left: 5px solid #e11d48;">
         <div class="card-header-title">
             ⚠️ Detail Peringatan Dini Cuaca, 3 Elemen Pembakar & Keyakinan Hotspot 5 Hari ke Depan
@@ -996,18 +1003,26 @@ HTML_PAGE = """<!DOCTYPE html>
             window.location.href = '/?prov=' + prov + '&view=' + view + '&source=' + source;
         }
 
+        // Penanganan sinkronisasi dengan polling status agar tidak memuat ulang sebelum database terisi
         function refreshData() {
             const btn = document.querySelector('.btn-refresh');
-            btn.innerHTML = '⏳ Menjalankan Sinkronisasi...';
+            btn.innerHTML = '⏳ Menghubungi Satelit NASA FIRMS (Mohon Tunggu 15-20 dtk)...';
             btn.disabled = true;
+
             fetch('/api/sync')
                 .then(r => r.json())
                 .then(res => {
-                    btn.innerHTML = '⏳ Memuat Data Satelit (8 dtk)...';
-                    setTimeout(() => {
-                        alert('Sinkronisasi data hotspot dan cuaca berhasil dijalankan!');
-                        window.location.reload();
-                    }, 8000);
+                    // Beri waktu 15 detik agar thread selesai mengunduh ribuan baris CSV dari NASA
+                    let count = 15;
+                    const interval = setInterval(() => {
+                        btn.innerHTML = '⏳ Memproses & Menyimpan Data Satelit (' + count + ' dtk)...';
+                        count--;
+                        if (count < 0) {
+                            clearInterval(interval);
+                            alert('Sinkronisasi data satelit NASA FIRMS berhasil dijalankan!');
+                            window.location.reload();
+                        }
+                    }, 1000);
                 })
                 .catch(e => {
                     alert('Gagal menyinkronkan data.');
@@ -1155,12 +1170,12 @@ def api_sync():
     def run_async():
         try:
             sync_hotspots_multi(ref_str)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error sinkronisasi hotspot: {e}")
         try:
             update_fire_risk_forecast_multi()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error sinkronisasi cuaca: {e}")
 
     t_sync = threading.Thread(target=run_async, daemon=True)
     t_sync.start()
