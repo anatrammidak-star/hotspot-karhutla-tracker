@@ -185,24 +185,22 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & PREDIKSI CUACA (PERBAIKAN KODE RESMI)
+# 3. PENARIKAN NASA FIRMS & PREDIKSI CUACA
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     combined = []
 
-    # Kode sensor resmi NASA FIRMS untuk endpoint Country
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("VIIRS_NOAA20_NRT", "NOAA-20"),
-        ("VIIRS_NOAA21_NRT", "NOAA-21"),
         ("MODIS_NRT", "Terra/Aqua"),
     ]
 
     for api_code, sat_lbl in sensors:
         url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
         try:
-            resp = requests.get(url, timeout=25)
+            resp = requests.get(url, timeout=20)
             if resp.status_code == 200 and "latitude" in resp.text:
                 lines = resp.text.strip().split("\n")
                 if len(lines) > 1 and "latitude" in lines[0]:
@@ -243,9 +241,9 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                                 "acq_date": acq_date,
                             })
         except Exception as e:
-            print(f"Error NASA FIRMS {sat_lbl}: {e}")
+            print(f"Error NASA {sat_lbl}: {e}")
 
-    print(f"--> [NASA FIRMS] Total titik terunduh dari 4 sensor: {len(combined)} titik.")
+    print(f"--> [NASA FIRMS] Total titik terunduh: {len(combined)} titik.")
     return combined
 
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
@@ -360,13 +358,12 @@ def sync_hotspots_multi(target_date_str):
     raw_points = fetch_satellite_data_multi(target_date_str, target_prov="ALL")
 
     if not raw_points:
-        print("Data satelit belum terambil atau kosong.")
-        return
+        return 0
 
     conn = sqlite3.connect(DB_NAME, timeout=30)
     c = conn.cursor()
 
-    # Bersihkan data dummy awal ketika titik satelit riil terbukti masuk
+    # Bersihkan data dummy contoh seketika data satelit riil masuk
     c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
     c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
 
@@ -379,7 +376,6 @@ def sync_hotspots_multi(target_date_str):
         dt = pt["acq_date"]
 
         status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
-        # Grid resolusi ~1.1 km untuk mengonsolidasikan sensor berbeda pada titik api yang sama
         cid = f"HS-{prov}-{round(lat, 2)}-{round(lon, 2)}"
         fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
@@ -397,10 +393,10 @@ def sync_hotspots_multi(target_date_str):
 
     conn.commit()
     conn.close()
-    print(f"--> [DATABASE] Berhasil menyimpan {len(raw_points)} titik ke pangkalan data SQLite.")
+    return len(raw_points)
 
 # ==========================================
-# 4. INITIAL SEED (DATA HISTORIS 10 HARI TERJAGA)
+# 4. INITIAL SEED (DATA AWAL SEBELUM SINKRONISASI)
 # ==========================================
 def seed_historical_multi():
     init_db()
@@ -662,7 +658,7 @@ def generate_table_multi(
 
     merged.insert(0, "No", range(1, len(merged) + 1))
     
-    # Ambil maksimal 300 titik prioritas untuk layer visual peta
+    # Ambil maksimal 300 titik teratas khusus untuk visualisasi peta
     map_df = merged.head(300)
     summary_stats["map_total"] = len(map_df)
 
@@ -1003,29 +999,26 @@ HTML_PAGE = """<!DOCTYPE html>
             window.location.href = '/?prov=' + prov + '&view=' + view + '&source=' + source;
         }
 
-        // Penanganan sinkronisasi dengan polling status agar tidak memuat ulang sebelum database terisi
+        // Sinkronisasi sinkron: Tunggu respon JSON dari server baru reload halaman
         function refreshData() {
             const btn = document.querySelector('.btn-refresh');
-            btn.innerHTML = '⏳ Menghubungi Satelit NASA FIRMS (Mohon Tunggu 15-20 dtk)...';
+            btn.innerHTML = '⏳ Menarik Data Satelit NASA FIRMS (Sedang Berjalan)...';
             btn.disabled = true;
 
             fetch('/api/sync')
                 .then(r => r.json())
                 .then(res => {
-                    // Beri waktu 15 detik agar thread selesai mengunduh ribuan baris CSV dari NASA
-                    let count = 15;
-                    const interval = setInterval(() => {
-                        btn.innerHTML = '⏳ Memproses & Menyimpan Data Satelit (' + count + ' dtk)...';
-                        count--;
-                        if (count < 0) {
-                            clearInterval(interval);
-                            alert('Sinkronisasi data satelit NASA FIRMS berhasil dijalankan!');
-                            window.location.reload();
-                        }
-                    }, 1000);
+                    if (res.status === 'ok') {
+                        alert('Berhasil! ' + res.total_hotspots + ' titik satelit riil berhasil ditarik dan diperbarui.');
+                        window.location.reload();
+                    } else {
+                        alert('Gagal menyinkronkan data.');
+                        btn.innerHTML = '🔄 Sinkronisasi Hotspot & Cuaca';
+                        btn.disabled = false;
+                    }
                 })
                 .catch(e => {
-                    alert('Gagal menyinkronkan data.');
+                    alert('Terjadi kendala jaringan saat menghubungi satelit.');
                     btn.innerHTML = '🔄 Sinkronisasi Hotspot & Cuaca';
                     btn.disabled = false;
                 });
@@ -1167,20 +1160,24 @@ def api_sync():
     ref_d, session_name = get_effective_date_and_session()
     ref_str = ref_d.strftime("%Y-%m-%d")
 
-    def run_async():
-        try:
-            sync_hotspots_multi(ref_str)
-        except Exception as e:
-            print(f"Error sinkronisasi hotspot: {e}")
-        try:
-            update_fire_risk_forecast_multi()
-        except Exception as e:
-            print(f"Error sinkronisasi cuaca: {e}")
+    # Eksekusi langsung secara sinkron agar browser menunggu hingga data tersimpan
+    total_downloaded = 0
+    try:
+        total_downloaded = sync_hotspots_multi(ref_str)
+    except Exception as e:
+        print(f"Error sinkronisasi hotspot: {e}")
 
-    t_sync = threading.Thread(target=run_async, daemon=True)
-    t_sync.start()
+    try:
+        update_fire_risk_forecast_multi()
+    except Exception as e:
+        print(f"Error sinkronisasi cuaca: {e}")
 
-    return jsonify({"status": "ok", "effective_date": ref_str, "session": session_name})
+    return jsonify({
+        "status": "ok",
+        "effective_date": ref_str,
+        "session": session_name,
+        "total_hotspots": total_downloaded
+    })
 
 @app.route("/download-excel")
 def download_excel():
