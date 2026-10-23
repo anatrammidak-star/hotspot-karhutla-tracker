@@ -16,7 +16,6 @@ import requests
 DB_NAME = "hotspot_multi.db"
 DEFAULT_NASA_KEY = "cf5d1449942e6c851eba10358106ea6f"
 
-# Bounding Box Koordinat: (min_lon, min_lat, max_lon, max_lat)
 PROV_BOUNDS = {
     "JAMBI": (101.15, -2.50, 104.55, -0.75),
     "SUMSEL": (102.05, -4.95, 106.15, -1.65),
@@ -185,12 +184,60 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & PREDIKSI CUACA
+# 3. PENARIKAN NASA FIRMS & CUACA H-5
 # ==========================================
+def parse_firms_csv(csv_text, sat_lbl, default_date, combined, target_prov):
+    lines = csv_text.strip().split("\n")
+    if len(lines) <= 1 or "latitude" not in lines[0]:
+        return 0
+
+    count = 0
+    df = pd.read_csv(io.StringIO(csv_text))
+    for _, r in df.iterrows():
+        try:
+            lat = float(r["latitude"])
+            lon = float(r["longitude"])
+        except Exception:
+            continue
+
+        matched_p = None
+        for p_name, bounds in PROV_BOUNDS.items():
+            if bounds[0] <= lon <= bounds[2] and bounds[1] <= lat <= bounds[3]:
+                matched_p = p_name
+                break
+
+        if matched_p:
+            if target_prov != "ALL" and matched_p != target_prov:
+                continue
+
+            c_raw = str(r.get("confidence", "nominal")).strip().lower()
+            if c_raw in ["h", "high"]:
+                conf_val = 90.0
+            elif c_raw in ["l", "low"]:
+                conf_val = 25.0
+            else:
+                try:
+                    conf_val = float(c_raw)
+                except ValueError:
+                    conf_val = 60.0
+
+            acq_date = str(r.get("acq_date", default_date))
+            combined.append({
+                "provinsi": matched_p,
+                "latitude": lat,
+                "longitude": lon,
+                "confidence": conf_val,
+                "satellite_source": sat_lbl,
+                "acq_date": acq_date,
+            })
+            count += 1
+    return count
+
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     combined = []
 
+    # Jalur Utama: API NASA FIRMS Resmi (Key-Based)
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("VIIRS_NOAA20_NRT", "NOAA-20"),
@@ -200,50 +247,29 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     for api_code, sat_lbl in sensors:
         url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
         try:
-            resp = requests.get(url, timeout=20)
-            if resp.status_code == 200 and "latitude" in resp.text:
-                lines = resp.text.strip().split("\n")
-                if len(lines) > 1 and "latitude" in lines[0]:
-                    df = pd.read_csv(io.StringIO(resp.text))
-                    for _, r in df.iterrows():
-                        lat = float(r["latitude"])
-                        lon = float(r["longitude"])
-
-                        matched_p = None
-                        for p_name, bounds in PROV_BOUNDS.items():
-                            if bounds[0] <= lon <= bounds[2] and bounds[1] <= lat <= bounds[3]:
-                                matched_p = p_name
-                                break
-
-                        if matched_p:
-                            if target_prov != "ALL" and matched_p != target_prov:
-                                continue
-
-                            c_raw = str(r.get("confidence", "nominal")).strip().lower()
-                            if c_raw in ["h", "high"]:
-                                conf_val = 90.0
-                            elif c_raw in ["l", "low"]:
-                                conf_val = 25.0
-                            else:
-                                try:
-                                    conf_val = float(c_raw)
-                                except ValueError:
-                                    conf_val = 60.0
-
-                            acq_date = str(r.get("acq_date", target_date_str))
-
-                            combined.append({
-                                "provinsi": matched_p,
-                                "latitude": lat,
-                                "longitude": lon,
-                                "confidence": conf_val,
-                                "satellite_source": sat_lbl,
-                                "acq_date": acq_date,
-                            })
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                parse_firms_csv(resp.text, sat_lbl, target_date_str, combined, target_prov)
         except Exception as e:
-            print(f"Error NASA {sat_lbl}: {e}")
+            print(f"Error jalur utama {sat_lbl}: {e}")
 
-    print(f"--> [NASA FIRMS] Total titik terunduh: {len(combined)} titik.")
+    # Jalur Cadangan (Bypass jika Kunci API Limit/Error): Direct Open Feed NASA FIRMS NRT
+    if len(combined) == 0:
+        print("--> Mengaktifkan jalur ekstraksi cadangan NASA FIRMS NRT...")
+        backup_sources = [
+            ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_SouthEast_Asia_24h.csv", "SNPP"),
+            ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_SouthEast_Asia_24h.csv", "NOAA-20"),
+            ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/modis-c6.1/csv/MODIS_C6_1_SouthEast_Asia_24h.csv", "Terra/Aqua")
+        ]
+        for b_url, b_lbl in backup_sources:
+            try:
+                b_resp = requests.get(b_url, timeout=18)
+                if b_resp.status_code == 200:
+                    parse_firms_csv(b_resp.text, b_lbl, target_date_str, combined, target_prov)
+            except Exception as e:
+                print(f"Error jalur cadangan {b_lbl}: {e}")
+
+    print(f"--> [TOTAL DATA SATELIT MASUK]: {len(combined)} titik.")
     return combined
 
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
@@ -363,7 +389,7 @@ def sync_hotspots_multi(target_date_str):
     conn = sqlite3.connect(DB_NAME, timeout=30)
     c = conn.cursor()
 
-    # Bersihkan data dummy contoh seketika data satelit riil masuk
+    # Hapus seluruh data bawaan 10 titik statis begitu data satelit riil terambil
     c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
     c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
 
@@ -376,6 +402,7 @@ def sync_hotspots_multi(target_date_str):
         dt = pt["acq_date"]
 
         status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+        # Grid resolusi ~1.1 km agar sensor yang mendeteksi titik yang sama otomatis terkonsolidasi
         cid = f"HS-{prov}-{round(lat, 2)}-{round(lon, 2)}"
         fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
@@ -396,7 +423,7 @@ def sync_hotspots_multi(target_date_str):
     return len(raw_points)
 
 # ==========================================
-# 4. INITIAL SEED (DATA AWAL SEBELUM SINKRONISASI)
+# 4. INITIAL SEED (HANYA AKTIF SAAT PERTAMA KALI KOSONG)
 # ==========================================
 def seed_historical_multi():
     init_db()
@@ -658,7 +685,7 @@ def generate_table_multi(
 
     merged.insert(0, "No", range(1, len(merged) + 1))
     
-    # Ambil maksimal 300 titik teratas khusus untuk visualisasi peta
+    # Ambil maksimal 300 titik teratas untuk visualisasi peta
     map_df = merged.head(300)
     summary_stats["map_total"] = len(map_df)
 
@@ -999,10 +1026,9 @@ HTML_PAGE = """<!DOCTYPE html>
             window.location.href = '/?prov=' + prov + '&view=' + view + '&source=' + source;
         }
 
-        // Sinkronisasi sinkron: Tunggu respon JSON dari server baru reload halaman
         function refreshData() {
             const btn = document.querySelector('.btn-refresh');
-            btn.innerHTML = '⏳ Menarik Data Satelit NASA FIRMS (Sedang Berjalan)...';
+            btn.innerHTML = '⏳ Menarik Langsung Data Satelit NASA (Tunggu 10-15 dtk)...';
             btn.disabled = true;
 
             fetch('/api/sync')
@@ -1160,7 +1186,6 @@ def api_sync():
     ref_d, session_name = get_effective_date_and_session()
     ref_str = ref_d.strftime("%Y-%m-%d")
 
-    # Eksekusi langsung secara sinkron agar browser menunggu hingga data tersimpan
     total_downloaded = 0
     try:
         total_downloaded = sync_hotspots_multi(ref_str)
