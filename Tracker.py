@@ -60,7 +60,6 @@ PROV_CENTERS = {
     "KALTIM": [0.3, 116.8, 7],
 }
 
-
 # ==========================================
 # 1. DATABASE LOKAL
 # ==========================================
@@ -127,7 +126,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def get_nasa_key():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -135,18 +133,6 @@ def get_nasa_key():
     row = c.fetchone()
     conn.close()
     return row[0] if row else DEFAULT_NASA_KEY
-
-
-def set_nasa_key(new_key):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('nasa_key', ?)",
-        (new_key,),
-    )
-    conn.commit()
-    conn.close()
-
 
 # ==========================================
 # 2. OVERLAY KAWASAN 5 PROVINSI
@@ -207,9 +193,7 @@ def overlay_kawasan_multi(df_points):
                 return pd.Series(["KPA (Taman Nasional)", "TN Meru Betiri", 0, "Jember / Banyuwangi"])
             elif 112.45 <= lon <= 112.75 and -7.85 <= lat <= -7.60:
                 return pd.Series(["KPA (Tahura)", "Tahura Raden Soerjo", 0, "Mojokerto / Batu"])
-            elif (111.35 <= lon <= 112.25 and -7.65 <= lat <= -7.05) or (
-                111.70 <= lon <= 112.50 and -8.25 <= lat <= -7.75
-            ):
+            elif (111.35 <= lon <= 112.25 and -7.65 <= lat <= -7.05) or (111.70 <= lon <= 112.50 and -8.25 <= lat <= -7.75):
                 return pd.Series(["KPH Perhutani (HP/HL)", "Hutan Produksi Perum Perhutani", 0, "Bojonegoro / Madiun"])
             else:
                 return pd.Series(["APL (Lahan Mineral)", "Tegalan / Sawah / Pemukiman", 0, "Kediri / Malang / Blitar"])
@@ -244,7 +228,6 @@ def overlay_kawasan_multi(df_points):
     gdf[["fungsi_kawasan", "nama_kawasan", "is_gambut", "kabupaten"]] = gdf.apply(classify_row, axis=1)
     return gdf
 
-
 # ==========================================
 # 3. SPATIAL CLUSTERING (~500m)
 # ==========================================
@@ -271,18 +254,7 @@ def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
                     INSERT INTO hotspot_clusters (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
                 """,
-                    (
-                        cid,
-                        prov,
-                        row.latitude,
-                        row.longitude,
-                        row.kabupaten,
-                        row.fungsi_kawasan,
-                        row.nama_kawasan,
-                        row.is_gambut,
-                        row.date,
-                        row.date,
-                    ),
+                    (cid, prov, row.latitude, row.longitude, row.kabupaten, row.fungsi_kawasan, row.nama_kawasan, row.is_gambut, row.date, row.date),
                 )
                 matched_ids.append((cid, row.name))
             conn.commit()
@@ -309,18 +281,7 @@ def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
                     INSERT INTO hotspot_clusters (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
                 """,
-                    (
-                        cid,
-                        prov,
-                        row.latitude,
-                        row.longitude,
-                        row.kabupaten,
-                        row.fungsi_kawasan,
-                        row.nama_kawasan,
-                        row.is_gambut,
-                        row.date,
-                        row.date,
-                    ),
+                    (cid, prov, row.latitude, row.longitude, row.kabupaten, row.fungsi_kawasan, row.nama_kawasan, row.is_gambut, row.date, row.date),
                 )
             matched_ids.append((cid, row.name))
 
@@ -328,45 +289,62 @@ def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
     id_dict = {orig_idx: cid for cid, orig_idx in matched_ids}
     return [id_dict.get(idx, f"HS-GEN-{idx}") for idx in new_gdf.index]
 
-
 # ==========================================
-# 4. PENARIKAN NASA & OPEN-METEO
+# 4. PENARIKAN NASA FIRMS & PREDIKSI CUACA H-5
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     prov_keys = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"] if target_prov == "ALL" else [target_prov]
     combined = []
 
+    satellite_sources = [
+        ("VIIRS_SNPP_NRT", "SNPP"),
+        ("NOAA_20_VIIRS_NRT", "NOAA-20"),
+        ("NOAA_21_VIIRS_NRT", "NOAA-21"),
+        ("MODIS_NRT", "Terra/Aqua"),
+    ]
+
     for p in prov_keys:
         bbox = PROVINSI_BBOX[p]
-        for api_code, sat_lbl in [
-            ("VIIRS_NOAA20_NRT", "NOAA-20"),
-            ("VIIRS_SNPP_NRT", "SNPP"),
-            ("MODIS_NRT", "Terra/Aqua"),
-        ]:
-            url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/1/{target_date_str}"
+        for api_code, sat_lbl in satellite_sources:
+            url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/2/{target_date_str}"
             try:
-                resp = requests.get(url, timeout=9)
+                resp = requests.get(url, timeout=12)
                 if resp.status_code == 200 and "latitude" in resp.text:
                     df = pd.read_csv(io.StringIO(resp.text))
+                    if df.empty or "latitude" not in df.columns:
+                        continue
+
                     for _, r in df.iterrows():
-                        c_raw = str(r.get("confidence", "n")).lower()
-                        c_val = (
-                            90.0
-                            if c_raw == "h"
-                            else (55.0 if c_raw == "n" else (20.0 if c_raw == "l" else float(c_raw)))
-                        )
+                        conf_val = 50.0
+                        if "confidence" in r:
+                            c_raw = str(r["confidence"]).strip().lower()
+                            if c_raw in ["h", "high"]:
+                                conf_val = 90.0
+                            elif c_raw in ["n", "nominal"]:
+                                conf_val = 60.0
+                            elif c_raw in ["l", "low"]:
+                                conf_val = 25.0
+                            else:
+                                try:
+                                    conf_val = float(c_raw)
+                                except ValueError:
+                                    conf_val = 50.0
+
+                        acq_date = str(r.get("acq_date", target_date_str))
+
                         combined.append({
                             "provinsi": p,
                             "latitude": float(r["latitude"]),
                             "longitude": float(r["longitude"]),
-                            "confidence": c_val,
+                            "confidence": conf_val,
                             "satellite_source": sat_lbl,
+                            "acq_date": acq_date,
                         })
             except Exception:
                 pass
-    return combined
 
+    return combined
 
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
     temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
@@ -426,9 +404,7 @@ def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
         ),
     )
 
-
 def update_fire_risk_forecast_multi():
-    """Mengambil data 5 hari ke depan dari Open-Meteo atau mengisi fallback baseline jika koneksi luar terkendala."""
     conn = sqlite3.connect(DB_NAME)
     today = date.today()
 
@@ -464,7 +440,6 @@ def update_fire_risk_forecast_multi():
         except Exception:
             fetched_successfully = False
 
-        # Fallback baseline jika koneksi API ke Open-Meteo time out
         if not fetched_successfully:
             for day_offset in range(5):
                 fc_date = (today + timedelta(days=day_offset)).strftime("%Y-%m-%d")
@@ -477,7 +452,6 @@ def update_fire_risk_forecast_multi():
 
     conn.commit()
     conn.close()
-
 
 def sync_hotspots_multi(target_date_str):
     init_db()
@@ -497,14 +471,15 @@ def sync_hotspots_multi(target_date_str):
     c = conn.cursor()
 
     df_raw = pd.DataFrame(raw_points)
-    df_raw["date"] = target_date_str
 
     def set_status(conf):
         return "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
 
     df_raw["status"] = df_raw["confidence"].apply(set_status)
+    df_raw["date"] = df_raw["acq_date"]
+
     gdf = overlay_kawasan_multi(df_raw)
-    gdf["cluster_id"] = match_or_create_clusters_multi(conn, gdf)
+    gdf["cluster_id"] = match_or_create_clusters_multi(conn, gdf, threshold_km=0.5)
 
     for _, row in gdf.iterrows():
         c.execute(
@@ -512,13 +487,7 @@ def sync_hotspots_multi(target_date_str):
             INSERT OR REPLACE INTO hotspot_daily_log (cluster_id, log_date, satellite_source, status, confidence)
             VALUES (?, ?, ?, ?, ?)
         """,
-            (
-                row.cluster_id,
-                target_date_str,
-                row.satellite_source,
-                row.status,
-                row.confidence,
-            ),
+            (row.cluster_id, row.date, row.satellite_source, row.status, row.confidence),
         )
 
     c.execute("SELECT cluster_id, consecutive_padam_days FROM hotspot_clusters WHERE is_active = 1")
@@ -528,15 +497,6 @@ def sync_hotspots_multi(target_date_str):
     for cid, padam_days in all_active:
         if cid not in active_today:
             new_p = padam_days + 1
-            for sat in ["NOAA-20", "SNPP", "Terra/Aqua", "HK-PJKarhutla"]:
-                c.execute(
-                    """
-                    INSERT OR REPLACE INTO hotspot_daily_log (cluster_id, log_date, satellite_source, status, confidence)
-                    VALUES (?, ?, ?, 'Padam', 0.0)
-                """,
-                    (cid, target_date_str, sat),
-                )
-
             if new_p >= 10:
                 c.execute(
                     "UPDATE hotspot_clusters SET consecutive_padam_days = ?, is_active = 0 WHERE cluster_id = ?",
@@ -550,7 +510,6 @@ def sync_hotspots_multi(target_date_str):
 
     conn.commit()
     conn.close()
-
 
 # ==========================================
 # 5. DATA AWAL HISTORIS DENGAN TANGGAL BERJALAN
@@ -593,19 +552,7 @@ def seed_historical_multi():
                 (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
-                (
-                    item["id"],
-                    item["prov"],
-                    item["lat"],
-                    item["lon"],
-                    item["kab"],
-                    item["f_kws"],
-                    item["n_kws"],
-                    item["gambut"],
-                    item["first"],
-                    item["last"],
-                    item["padam_cnt"],
-                ),
+                (item["id"], item["prov"], item["lat"], item["lon"], item["kab"], item["f_kws"], item["n_kws"], item["gambut"], item["first"], item["last"], item["padam_cnt"]),
             )
 
             for day_offset in range(10):
@@ -630,7 +577,6 @@ def seed_historical_multi():
         conn.commit()
     conn.close()
 
-
 # ==========================================
 # 6. PIVOT & PERHITUNGAN RINGKASAN
 # ==========================================
@@ -648,15 +594,15 @@ def get_effective_date_and_session():
         session_text = "Sesi Sore 18.00 WIB (Hari Ini)"
     return effective_date, session_text
 
-
 def get_provincial_potential_summary():
+    """Mengagregasi data baris Detail Peringatan Dini Cuaca ke dalam Matriks Antar-Provinsi."""
     conn = sqlite3.connect(DB_NAME)
     summary = []
     prov_list = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]
 
     for p in prov_list:
         df_p = pd.read_sql_query(
-            f"SELECT risk_score, risk_category, is_gambut, confidence_pct FROM fire_risk_forecast WHERE provinsi = '{p}'",
+            f"SELECT nama_kawasan, risk_score, risk_category, is_gambut, confidence_pct FROM fire_risk_forecast WHERE provinsi = '{p}'",
             conn,
         )
         df_hs = pd.read_sql_query(
@@ -664,20 +610,26 @@ def get_provincial_potential_summary():
             conn,
         )
 
-        ekstrim = int((df_p["risk_category"] == "Ekstrim").sum()) if not df_p.empty else 0
-        tinggi = int((df_p["risk_category"] == "Tinggi").sum()) if not df_p.empty else 0
-        gambut = int((((df_p["risk_score"] >= 60) & (df_p["is_gambut"] == 1))).sum()) if not df_p.empty else 0
-        max_conf = (
-            round(float(df_p["confidence_pct"].max()), 1)
-            if not df_p.empty and not df_p["confidence_pct"].isna().all()
-            else 0.0
-        )
+        if not df_p.empty:
+            max_conf = round(float(df_p["confidence_pct"].max()), 1)
+            # Hitung titik sentinel unik yang mencapai kategori ekstrim dalam jendela 5 hari
+            ekstrim_sites = df_p[df_p["risk_category"] == "Ekstrim"]["nama_kawasan"].nunique()
+            # Hitung titik sentinel unik kategori tinggi
+            tinggi_sites = df_p[df_p["risk_category"] == "Tinggi"]["nama_kawasan"].nunique()
+            # Hitung titik rawan gambut unik
+            gambut_sites = df_p[(df_p["risk_score"] >= 60) & (df_p["is_gambut"] == 1)]["nama_kawasan"].nunique()
+        else:
+            max_conf = 0.0
+            ekstrim_sites = 0
+            tinggi_sites = 0
+            gambut_sites = 0
+
         hs_count = int(df_hs.iloc[0]["hs_cnt"]) if not df_hs.empty else 0
 
-        if ekstrim >= 2:
+        if ekstrim_sites >= 2 or max_conf >= 90.0:
             status_label = "Siaga 1 (Kritis Ekstrim)"
             badge_class = "badge-ekstrim"
-        elif ekstrim >= 1 or tinggi >= 2:
+        elif ekstrim_sites >= 1 or tinggi_sites >= 2:
             status_label = "Siaga 2 (Tinggi)"
             badge_class = "badge-tinggi"
         else:
@@ -688,16 +640,15 @@ def get_provincial_potential_summary():
             "provinsi": p,
             "status_label": status_label,
             "badge_class": badge_class,
-            "ekstrim_cnt": ekstrim,
-            "tinggi_cnt": tinggi,
-            "gambut_cnt": gambut,
+            "ekstrim_cnt": ekstrim_sites,
+            "tinggi_cnt": tinggi_sites,
+            "gambut_cnt": gambut_sites,
             "max_confidence": max_conf,
             "hs_count": hs_count,
         })
 
     conn.close()
     return summary
-
 
 def get_forecast_summary_multi(filter_prov="ALL"):
     conn = sqlite3.connect(DB_NAME)
@@ -710,8 +661,11 @@ def get_forecast_summary_multi(filter_prov="ALL"):
     """
     df_fc = pd.read_sql_query(query, conn)
     conn.close()
-    return df_fc.to_dict(orient="records") if not df_fc.empty else []
-
+    
+    records = df_fc.to_dict(orient="records") if not df_fc.empty else []
+    for idx, item in enumerate(records, start=1):
+        item["no"] = idx
+    return records
 
 def generate_table_multi(
     ref_date,
@@ -757,7 +711,7 @@ def generate_table_multi(
 
     fc_prov_where = "" if filter_prov == "ALL" else f"AND provinsi = '{filter_prov}'"
     df_fc_stats = pd.read_sql_query(
-        f"SELECT COUNT(*) as cnt, MAX(confidence_pct) as max_c FROM fire_risk_forecast WHERE risk_score >= 80 {fc_prov_where}",
+        f"SELECT COUNT(DISTINCT nama_kawasan) as cnt, MAX(confidence_pct) as max_c FROM fire_risk_forecast WHERE risk_score >= 80 {fc_prov_where}",
         conn,
     )
     if not df_fc_stats.empty:
@@ -832,7 +786,6 @@ def generate_table_multi(
     merged.insert(0, "No", range(1, len(merged) + 1))
     return merged, date_list, summary_stats
 
-
 def export_to_excel_multi(
     ref_date_str,
     filter_prov="ALL",
@@ -853,7 +806,6 @@ def export_to_excel_multi(
         export_df.to_excel(file_name, index=False)
     return file_name
 
-
 # ==========================================
 # 7. PENJADWAL OTOMATIS
 # ==========================================
@@ -862,14 +814,12 @@ def scheduled_sync_multi():
     sync_hotspots_multi(today_str)
     update_fire_risk_forecast_multi()
 
-
 def run_scheduler():
     schedule.every().day.at("07:00").do(scheduled_sync_multi)
     schedule.every().day.at("18:00").do(scheduled_sync_multi)
     while True:
         schedule.run_pending()
         time.sleep(30)
-
 
 # ==========================================
 # 8. DASBOR FLASK + LEAFLET INTEGRATED
@@ -1021,19 +971,19 @@ HTML_TEMPLATE = """
     {% if current_view != 'HOTSPOT_ONLY' %}
     <div class="card" style="border-top: 4px solid #0284c7;">
         <div class="card-header-title">
-            📊 Rekapitulasi Matriks Status Potensi Karhutla Antar-Provinsi (5 Provinsi)
+            📊 Rekapitulasi Matriks Status Potensi Karhutla Antar-Provinsi (Agregasi Data Prediksi H-5)
         </div>
         <table>
             <thead>
                 <tr>
                     <th>Provinsi</th>
                     <th>Status Siaga Utama</th>
-                    <th>Keyakinan Hotspot Maksimum</th>
-                    <th>Titik Ekstrim (H-5)</th>
-                    <th>Titik Siaga Tinggi</th>
+                    <th>Keyakinan Hotspot Maksimum (Detail H-5)</th>
+                    <th>Titik Sentinel Ekstrim (H-5)</th>
+                    <th>Titik Sentinel Siaga Tinggi</th>
                     <th>Titik Rawan Gambut</th>
                     <th>Hotspot Eksisting</th>
-                    <th>Rekomendasi Lapangan</th>
+                    <th>Rekomendasi Operasional Lapangan</th>
                 </tr>
             </thead>
             <tbody>
@@ -1042,9 +992,9 @@ HTML_TEMPLATE = """
                     <td><span class="prov-tag prov-{{ p['provinsi']|lower }}">{{ p['provinsi'] }}</span></td>
                     <td><span class="badge {{ p['badge_class'] }}">{{ p['status_label'] }}</span></td>
                     <td><b style="color:#dc2626; font-size:14px;">{{ p['max_confidence'] }}%</b></td>
-                    <td><b>{{ p['ekstrim_cnt'] }} Titik</b></td>
-                    <td>{{ p['tinggi_cnt'] }} Titik</td>
-                    <td>{% if p['gambut_cnt'] > 0 %}<span style="color:#ea580c; font-weight:700;">{{ p['gambut_cnt'] }} Titik</span>{% else %}-{% endif %}</td>
+                    <td><b>{{ p['ekstrim_cnt'] }} Titik Sentinel</b></td>
+                    <td>{{ p['tinggi_cnt'] }} Titik Sentinel</td>
+                    <td>{% if p['gambut_cnt'] > 0 %}<span style="color:#ea580c; font-weight:700;">{{ p['gambut_cnt'] }} Titik Sentinel</span>{% else %}-{% endif %}</td>
                     <td><b>{{ p['hs_count'] }} Titik</b></td>
                     <td style="font-size:12px; color:#475569;">
                         {% if p['provinsi'] == 'KALTENG' %}
@@ -1073,6 +1023,7 @@ HTML_TEMPLATE = """
         <table>
             <thead>
                 <tr>
+                    <th>No</th>
                     <th>Provinsi</th>
                     <th>Titik Sentinel / Kawasan Kritis</th>
                     <th>Koordinat Acuan</th>
@@ -1089,6 +1040,7 @@ HTML_TEMPLATE = """
             <tbody>
                 {% for f in forecasts %}
                 <tr>
+                    <td><b>{{ f['no'] }}</b></td>
                     <td><span class="prov-tag prov-{{ f['provinsi']|lower }}">{{ f['provinsi'] }}</span></td>
                     <td><b>{{ f['nama_kawasan'] }}</b></td>
                     <td><code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-weight:bold;">{{ "%.4f"|format(f['latitude']) }}, {{ "%.4f"|format(f['longitude']) }}</code></td>
@@ -1199,7 +1151,7 @@ HTML_TEMPLATE = """
             fetch('/api/sync')
                 .then(r => r.json())
                 .then(res => {
-                    btn.innerHTML = '⏳ Mengambil Data Cuaca & Satelit (8 dtk)...';
+                    btn.innerHTML = '⏳ Menarik Data Satelit & Cuaca (8 dtk)...';
                     setTimeout(() => {
                         alert('Data hotspot dan prediksi cuaca 5 provinsi berhasil disinkronkan!');
                         window.location.reload();
@@ -1256,7 +1208,7 @@ HTML_TEMPLATE = """
             hotspotLayer.addLayer(circle);
         });
 
-        // Render Titik Potensi Karhutla H-5 (Dengan Koordinat & Keyakinan %)
+        // Render Titik Potensi Karhutla H-5
         const sentinelRendered = new Set();
         forecastData.forEach(fc => {
             const key = fc.latitude + '_' + fc.longitude;
@@ -1332,7 +1284,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
 @app.route("/")
 def index():
     prov = request.args.get("prov", "ALL")
@@ -1372,7 +1323,6 @@ def index():
         stats=stats,
     )
 
-
 @app.route("/api/sync")
 def api_sync():
     ref_d, session_name = get_effective_date_and_session()
@@ -1393,7 +1343,6 @@ def api_sync():
 
     return jsonify({"status": "ok", "effective_date": ref_str, "session": session_name})
 
-
 @app.route("/download-excel")
 def download_excel():
     prov = request.args.get("prov", "ALL")
@@ -1406,9 +1355,8 @@ def download_excel():
         return send_file(out_file, as_attachment=True, download_name=out_file)
     return "File Excel belum tersedia", 404
 
-
 # ==========================================
-# 9. INISIALISASI OTOMATIS (LOKAL & CLOUD)
+# 9. INISIALISASI OTOMATIS
 # ==========================================
 init_db()
 seed_historical_multi()
