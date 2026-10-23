@@ -9,7 +9,6 @@ from datetime import date, datetime, timedelta
 from flask import Flask, jsonify, render_template_string, request, send_file
 import pandas as pd
 import requests
-import schedule
 
 # ==========================================
 # KONFIGURASI SISTEM (5 PROVINSI)
@@ -133,7 +132,7 @@ def get_nasa_key():
     return row[0] if row else DEFAULT_NASA_KEY
 
 # ==========================================
-# 2. OVERLAY KAWASAN CEPAT
+# 2. OVERLAY KAWASAN RINGAN (RAM < 5MB)
 # ==========================================
 def classify_point_fast(prov, lat, lon):
     if prov == "JAMBI":
@@ -186,14 +185,13 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & CUACA H-5
+# 3. PENARIKAN NASA FIRMS & OPEN-METEO
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     prov_keys = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"] if target_prov == "ALL" else [target_prov]
     combined = []
 
-    # Format parameter resmi NASA FIRMS /api/area/csv/
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("VIIRS_NOAA20_NRT", "NOAA-20"),
@@ -205,7 +203,7 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
         for api_code, sat_lbl in sensors:
             url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/2"
             try:
-                resp = requests.get(url, timeout=10)
+                resp = requests.get(url, timeout=8)
                 if resp.status_code == 200 and "latitude" in resp.text:
                     df = pd.read_csv(io.StringIO(resp.text))
                     if df.empty or "latitude" not in df.columns:
@@ -384,7 +382,7 @@ def sync_hotspots_multi(target_date_str):
     conn.close()
 
 # ==========================================
-# 4. INITIAL SEED (DENGAN BASELINE 10 HARI JIKA NASA KOSONG)
+# 4. INITIAL SEED (BASELINE 10 HARI CEPAT)
 # ==========================================
 def seed_historical_multi():
     init_db()
@@ -397,7 +395,6 @@ def seed_historical_multi():
     today = date.today()
     today_str = today.strftime("%Y-%m-%d")
 
-    # Masukkan baseline sebaran 5 provinsi agar sistem tidak pernah kosong total (0)
     if total_clusters == 0:
         sample_clusters = [
             ("HS-KALTENG-S01", "KALTENG", -2.350, 113.850, "Pulang Pisau", "KPA (Taman Nasional)", "TN Sebangau", 1),
@@ -432,8 +429,6 @@ def seed_historical_multi():
         conn.commit()
 
     conn.close()
-    # Picu penarikan live NASA di background
-    threading.Thread(target=sync_hotspots_multi, args=(today_str,), daemon=True).start()
 
 # ==========================================
 # 5. PIVOT & PERHITUNGAN RINGKASAN
@@ -669,14 +664,15 @@ def scheduled_sync_multi():
     update_fire_risk_forecast_multi()
 
 def run_scheduler():
-    schedule.every().day.at("07:00").do(scheduled_sync_multi)
-    schedule.every().day.at("18:00").do(scheduled_sync_multi)
     while True:
-        schedule.run_pending()
-        time.sleep(30)
+        now_str = datetime.now().strftime("%H:%M")
+        if now_str in ["07:00", "18:00"]:
+            scheduled_sync_multi()
+            time.sleep(60)
+        time.sleep(25)
 
 # ==========================================
-# 7. DASBOR FLASK + LEAFLET INTEGRATED
+# 7. FLASK APP & HTML TEMPLATE
 # ==========================================
 app = Flask(__name__)
 
@@ -1105,126 +1101,4 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             forecastLayer.addTo(map);
         } else if (currentView === 'HOTSPOT_ONLY') {
             hotspotLayer.addTo(map);
-        } else if (currentView === 'FORECAST_ONLY') {
-            forecastLayer.addTo(map);
-        }
-
-        const overlayMaps = {
-            "🛰️ Hotspot Eksisting (Satelit)": hotspotLayer,
-            "⚠️ Potensi Karhutla H-5 (Sentinel)": forecastLayer
-        };
-        L.control.layers(null, overlayMaps, {collapsed: false, position: 'topright'}).addTo(map);
-
-        const legend = L.control({position: 'bottomright'});
-        legend.onAdd = function (map) {
-            const div = L.DomUtil.create('div', 'legend-box');
-            div.innerHTML = `
-                <b>Legenda Spasial</b><br>
-                <span class="legend-dot" style="background:#dc2626;"></span> Hotspot Eksisting Tinggi (≥80%)<br>
-                <span class="legend-dot" style="background:#d97706;"></span> Hotspot Eksisting Sedang<br>
-                <span class="legend-dot" style="background:#94a3b8;"></span> Hotspot Padam (Riwayat 10 Hari)<br>
-                <span class="legend-dot" style="background:#ea580c; border:1px dashed #ffffff;"></span> Titik Potensi Karhutla (Sentinel H-5)
-            `;
-            return div;
-        };
-        legend.addTo(map);
-    </script>
-</body>
-</html>
-"""
-
-@app.route("/")
-def index():
-    prov = request.args.get("prov", "ALL")
-    view = request.args.get("view", "ALL_LAYERS")
-    source = request.args.get("source", "ALL_DATA")
-    sat = request.args.get("sat", "ALL")
-    status = request.args.get("status", "ALL")
-
-    ref_d, session_name = get_effective_date_and_session()
-    ref_str = ref_d.strftime("%Y-%m-%d")
-
-    df, date_list, stats = generate_table_multi(
-        ref_d,
-        filter_prov=prov,
-        filter_sat=sat,
-        filter_status=status,
-        filter_source=source,
-    )
-    rows = df.to_dict(orient="records") if not df.empty else []
-    forecasts = get_forecast_summary_multi(filter_prov=prov)
-    prov_summary = get_provincial_potential_summary()
-    map_center = PROV_CENTERS.get(prov, PROV_CENTERS["ALL"])
-
-    return render_template_string(
-        HTML_TEMPLATE,
-        rows=rows,
-        forecasts=forecasts,
-        prov_summary=prov_summary,
-        map_center=map_center,
-        date_columns=date_list,
-        ref_date=ref_str,
-        session_name=session_name,
-        current_prov=prov,
-        current_view=view,
-        current_source=source,
-        current_sat=sat,
-        stats=stats,
-    )
-
-@app.route("/api/sync")
-def api_sync():
-    ref_d, session_name = get_effective_date_and_session()
-    ref_str = ref_d.strftime("%Y-%m-%d")
-
-    def run_async():
-        try:
-            sync_hotspots_multi(ref_str)
-        except Exception:
-            pass
-        try:
-            update_fire_risk_forecast_multi()
-        except Exception:
-            pass
-
-    t_sync = threading.Thread(target=run_async, daemon=True)
-    t_sync.start()
-
-    return jsonify({"status": "ok", "effective_date": ref_str, "session": session_name})
-
-@app.route("/download-excel")
-def download_excel():
-    prov = request.args.get("prov", "ALL")
-    sat = request.args.get("sat", "ALL")
-    source = request.args.get("source", "ALL_DATA")
-    ref_d, _ = get_effective_date_and_session()
-    ref_str = ref_d.strftime("%Y-%m-%d")
-    out_file = export_to_excel_multi(ref_str, filter_prov=prov, filter_sat=sat, filter_source=source)
-    if os.path.exists(out_file):
-        return send_file(out_file, as_attachment=True, download_name=out_file)
-    return "File Excel belum tersedia", 404
-
-# ==========================================
-# 8. INISIALISASI OTOMATIS (CEPAT & BEBAS TIMEOUT)
-# ==========================================
-init_db()
-
-def startup_background_tasks():
-    # Beri jeda 2 detik agar Gunicorn selesai mengikat port web
-    time.sleep(2)
-    try:
-        seed_historical_multi()
-    except Exception as e:
-        print(f"Error seed: {e}")
-    try:
-        update_fire_risk_forecast_multi()
-    except Exception as e:
-        print(f"Error forecast: {e}")
-
-# Jalankan semua proses unduh data di thread terpisah agar booting instan
-threading.Thread(target=startup_background_tasks, daemon=True).start()
-threading.Thread(target=run_scheduler, daemon=True).start()
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+        } else if (currentView === 'FORE
