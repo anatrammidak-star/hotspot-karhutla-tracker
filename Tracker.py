@@ -296,27 +296,27 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     combined = []
 
-    # Bounding Box Filter manual per provinsi (koordinat min_lon, min_lat, max_lon, max_lat)
+    # Bounding Box Koordinat: [min_lon, min_lat, max_lon, max_lat]
     PROV_BOUNDS = {
         "JAMBI": (101.15, -2.50, 104.55, -0.75),
         "SUMSEL": (102.05, -4.95, 106.15, -1.65),
         "JATIM": (110.85, -8.80, 114.65, -6.75),
         "KALTENG": (110.75, -3.55, 115.85, 0.75),
-        "KALTIM": (113.80, -2.45, 119.05, 2.85)
+        "KALTIM": (113.80, -2.45, 119.05, 2.85),
     }
 
-    # Tarik data resmi Indonesia langsung (IDN) untuk sensor utama
+    # Sensor resmi Near Real-Time (NRT) NASA FIRMS
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("VIIRS_NOAA20_NRT", "NOAA-20"),
-        ("MODIS_NRT", "Terra/Aqua")
+        ("MODIS_NRT", "Terra/Aqua"),
     ]
 
     for api_code, sat_lbl in sensors:
-        # Menarik data 1-2 hari terakhir untuk seluruh Indonesia
-        url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/1/{target_date_str}"
+        # Gunakan format baku resmi: /api/country/csv/[MAP_KEY]/[SENSOR]/IDN/[HARI]
+        url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
         try:
-            resp = requests.get(url, timeout=15)
+            resp = requests.get(url, timeout=20)
             if resp.status_code == 200 and "latitude" in resp.text:
                 df = pd.read_csv(io.StringIO(resp.text))
                 if df.empty or "latitude" not in df.columns:
@@ -326,11 +326,10 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                     lat = float(r["latitude"])
                     lon = float(r["longitude"])
 
-                    # Cek apakah koordinat masuk ke dalam 5 provinsi target
+                    # Penyaringan cepat koordinat batas provinsi
                     matched_prov = None
                     for prov_name, bounds in PROV_BOUNDS.items():
-                        min_x, min_y, max_x, max_y = bounds
-                        if min_x <= lon <= max_x and min_y <= lat <= max_y:
+                        if bounds[0] <= lon <= bounds[2] and bounds[1] <= lat <= bounds[3]:
                             matched_prov = prov_name
                             break
 
@@ -338,8 +337,7 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                         if target_prov != "ALL" and matched_prov != target_prov:
                             continue
 
-                        # Parsing confidence
-                        c_raw = str(r.get("confidence", "nominal")).strip().lower()
+                        c_raw = str(r.get("confidence", "n")).strip().lower()
                         if c_raw in ["h", "high"]:
                             conf_val = 90.0
                         elif c_raw in ["l", "low"]:
@@ -350,19 +348,21 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                             except ValueError:
                                 conf_val = 60.0
 
+                        acq_date = str(r.get("acq_date", target_date_str))
+
                         combined.append({
                             "provinsi": matched_prov,
                             "latitude": lat,
                             "longitude": lon,
                             "confidence": conf_val,
                             "satellite_source": sat_lbl,
-                            "acq_date": str(r.get("acq_date", target_date_str))
+                            "acq_date": acq_date,
                         })
         except Exception as e:
             print(f"Gagal menarik sensor {sat_lbl}: {e}")
-            pass
 
     return combined
+    
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
     temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
     rh_score = min(max((75.0 - rm) * 1.2, 0), 30)
