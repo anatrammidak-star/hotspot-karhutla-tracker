@@ -392,7 +392,7 @@ def sync_hotspots_multi(target_date_str):
     conn.close()
 
 # ==========================================
-# 4. INITIAL SEED (DATA SANDARAN BERJALAN)
+# 4. INITIAL SEED (DATA HISTORIS 10 HARI TERJAGA)
 # ==========================================
 def seed_historical_multi():
     init_db()
@@ -591,6 +591,7 @@ def generate_table_multi(
         )
         pivot = agg_logs.pivot(index="cluster_id", columns="log_date", values="status").fillna("Padam")
 
+        # Konsolidasi sensor: gabungkan nama sensor tanpa duplikasi
         sat_summary = {}
         for cid, group in df_logs[df_logs["status"] != "Padam"].groupby("cluster_id"):
             all_sats = []
@@ -654,7 +655,7 @@ def generate_table_multi(
 
     merged.insert(0, "No", range(1, len(merged) + 1))
     
-    # Ambil 300 titik teratas khusus untuk render visualisasi peta
+    # Ambil maksimal 300 titik teratas khusus untuk penanda peta
     map_df = merged.head(300)
     summary_stats["map_total"] = len(map_df)
 
@@ -874,7 +875,7 @@ HTML_PAGE = """<!DOCTYPE html>
         </table>
     </div>
 
-    <!-- DETAIL PERINGATAN DINI CUACA -->
+    <!-- DETAIL PERINGATAN DINI CUACA (75 TITIK LENGKAP) -->
     <div class="card" style="border-left: 5px solid #e11d48;">
         <div class="card-header-title">
             ⚠️ Detail Peringatan Dini Cuaca, 3 Elemen Pembakar & Keyakinan Hotspot 5 Hari ke Depan
@@ -932,6 +933,7 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
     {% endif %}
 
+    <!-- MATRIKS RIWAYAT 10 HARI LENGKAP -->
     {% if current_view != 'FORECAST_ONLY' %}
     <div class="card">
         <div class="card-header-title">
@@ -1178,7 +1180,7 @@ def download_excel():
     return "File Excel belum tersedia", 404
 
 # ==========================================
-# 8. INISIALISASI BEBAS TIMEOUT & OOM
+# 8. INISIALISASI BEBAS OOM & INSTANT BOOT
 # ==========================================
 init_db()
 
