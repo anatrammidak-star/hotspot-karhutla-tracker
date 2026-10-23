@@ -136,7 +136,7 @@ def get_nasa_key():
     return row[0] if row else DEFAULT_NASA_KEY
 
 # ==========================================
-# 2. OVERLAY KAWASAN CEPAT
+# 2. OVERLAY KAWASAN CEPAT (SEMUA 5 PROVINSI)
 # ==========================================
 def classify_point_fast(prov, lat, lon):
     if prov == "JAMBI":
@@ -257,8 +257,8 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                             "satellite_source": sat_lbl,
                             "acq_date": acq_date,
                         })
-        except Exception as e:
-            print(f"Error fetching {sat_lbl}: {e}")
+        except Exception:
+            pass
 
     return combined
 
@@ -379,10 +379,10 @@ def sync_hotspots_multi(target_date_str):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
-    # Bersihkan data dummy lama
+    # Bersihkan data dummy lama di semua provinsi
     c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-01' OR cluster_id LIKE 'HS-%-02'")
 
-    for idx, pt in enumerate(raw_points):
+    for pt in raw_points:
         prov = pt["provinsi"]
         lat = pt["latitude"]
         lon = pt["longitude"]
@@ -391,7 +391,7 @@ def sync_hotspots_multi(target_date_str):
         dt = pt["acq_date"]
 
         status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
-        cid = f"HS-{prov}-{dt}-{int(lat*1000)}-{int(lon*1000)}"
+        cid = f"HS-{prov}-{dt}-{int(abs(lat)*1000)}-{int(abs(lon)*1000)}"
 
         fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
@@ -411,10 +411,9 @@ def sync_hotspots_multi(target_date_str):
     conn.close()
 
 # ==========================================
-# 4. INITIAL SEED (PERBAIKAN ERROR NAME 'C')
+# 4. INITIAL SEED (PERBAIKAN KURSOR C)
 # ==========================================
 def seed_historical_multi():
-    """Inisialisasi basis data awal dan sinkronisasi satelit."""
     init_db()
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -423,7 +422,6 @@ def seed_historical_multi():
     total_clusters = c.fetchone()[0]
     conn.close()
 
-    # Jika tabel klaster kosong, langsung jalankan sinkronisasi data riil
     today_str = date.today().strftime("%Y-%m-%d")
     if total_clusters == 0:
         sync_hotspots_multi(today_str)
@@ -673,15 +671,13 @@ def run_scheduler():
 # ==========================================
 app = Flask(__name__)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
     <title>Sistem Pemantauan Hotspot & Peringatan Dini Karhutla Multi-Provinsi</title>
-    <!-- Leaflet.js CDN -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px; background: #f8fafc; color: #1e293b; }
         .header { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 20px 28px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }
@@ -982,7 +978,6 @@ HTML_TEMPLATE = """
     </div>
     {% endif %}
 
-    <!-- SCRIPT LEAFLET LENGKAP -->
     <script>
         function applyFilters() {
             const prov = document.getElementById('provSelect').value;
@@ -1026,7 +1021,6 @@ HTML_TEMPLATE = """
         const forecastData = {{ forecasts|tojson }};
         const currentView = "{{ current_view }}";
 
-        // Render Titik Hotspot Eksisting
         hotspotData.forEach(pt => {
             const st = pt.status_terakhir || 'Padam';
             const isPadam = st === 'Padam';
@@ -1045,7 +1039,7 @@ HTML_TEMPLATE = """
                 <div style="font-size:12px; min-width:210px;">
                     <strong style="color:${color}; font-size:14px;">Hotspot Eksisting: ${st}</strong><br>
                     <b>Kawasan:</b> ${pt.nama_kawasan}<br>
-                    <b>Koordinat:</b> ${Number(pt.latitude).toFixed(4)},${Number(pt.longitude).toFixed(4)}<br>
+                    <b>Koordinat:</b> ${Number(pt.latitude).toFixed(4)}, ${Number(pt.longitude).toFixed(4)}<br>
                     <b>Kabupaten:</b> ${pt.kabupaten} (${pt.provinsi})<br>
                     <b>Fungsi:</b> ${pt.fungsi_kawasan}<br>
                     <b>Tipe Lahan:</b> ${pt.is_gambut_label === 'Ya' ? 'Rawa Gambut' : 'Tanah Mineral'}<br>
@@ -1055,7 +1049,6 @@ HTML_TEMPLATE = """
             hotspotLayer.addLayer(circle);
         });
 
-        // Render Titik Potensi Karhutla H-5
         const sentinelRendered = new Set();
         forecastData.forEach(fc => {
             const key = fc.latitude + '_' + fc.longitude;
@@ -1084,9 +1077,140 @@ HTML_TEMPLATE = """
                         </div>
                         <b style="font-size:13px; display:inline-block; margin-top:4px;">${fc.nama_kawasan}</b><br>
                         <span style="color:#0f172a; font-weight:bold; background:#f1f5f9; padding:1px 4px; border-radius:3px;">
-                            📍 ${Number(fc.latitude).toFixed(4)},${Number(fc.longitude).toFixed(4)}
+                            📍 ${Number(fc.latitude).toFixed(4)}, ${Number(fc.longitude).toFixed(4)}
                         </span><br>
-                        <span style="color:#64748b;">${fc.provinsi} \vert{}${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
+                        <span style="color:#64748b;">${fc.provinsi} | ${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
                         <hr style="border:0; border-top:1px solid #e2e8f0; margin:6px 0;">
                         <b>Analisis 3 Elemen Pembakar:</b><br>
-                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_
+                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_max >= 34 ? '<span style="color:red; font-weight:bold;">Kritis</span>' : 'Normal'})<br>
+                        🍂 <b>2. Bahan Bakar / HTH:</b> ${fc.dry_days_projected} Hari Kering (${fc.precip_sum} mm)<br>
+                        💨 <b>3. Desikasi (RH & Angin):</b> RH ${fc.rh_min}% | Angin ${fc.wind_max} km/j
+                    </div>
+                `);
+                forecastLayer.addLayer(marker);
+            }
+        });
+
+        if (currentView === 'ALL_LAYERS') {
+            hotspotLayer.addTo(map);
+            forecastLayer.addTo(map);
+        } else if (currentView === 'HOTSPOT_ONLY') {
+            hotspotLayer.addTo(map);
+        } else if (currentView === 'FORECAST_ONLY') {
+            forecastLayer.addTo(map);
+        }
+
+        const overlayMaps = {
+            "🛰️ Hotspot Eksisting (Satelit)": hotspotLayer,
+            "⚠️ Potensi Karhutla H-5 (Sentinel)": forecastLayer
+        };
+        L.control.layers(null, overlayMaps, {collapsed: false, position: 'topright'}).addTo(map);
+
+        const legend = L.control({position: 'bottomright'});
+        legend.onAdd = function (map) {
+            const div = L.DomUtil.create('div', 'legend-box');
+            div.innerHTML = `
+                <b>Legenda Spasial</b><br>
+                <span class="legend-dot" style="background:#dc2626;"></span> Hotspot Eksisting Tinggi (≥80%)<br>
+                <span class="legend-dot" style="background:#d97706;"></span> Hotspot Eksisting Sedang<br>
+                <span class="legend-dot" style="background:#94a3b8;"></span> Hotspot Padam (Riwayat 10 Hari)<br>
+                <span class="legend-dot" style="background:#ea580c; border:1px dashed #ffffff;"></span> Titik Potensi Karhutla (Sentinel H-5)
+            `;
+            return div;
+        };
+        legend.addTo(map);
+    </script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def index():
+    prov = request.args.get("prov", "ALL")
+    view = request.args.get("view", "ALL_LAYERS")
+    source = request.args.get("source", "ALL_DATA")
+    sat = request.args.get("sat", "ALL")
+    status = request.args.get("status", "ALL")
+
+    ref_d, session_name = get_effective_date_and_session()
+    ref_str = ref_d.strftime("%Y-%m-%d")
+
+    df, date_list, stats = generate_table_multi(
+        ref_d,
+        filter_prov=prov,
+        filter_sat=sat,
+        filter_status=status,
+        filter_source=source,
+    )
+    rows = df.to_dict(orient="records") if not df.empty else []
+    forecasts = get_forecast_summary_multi(filter_prov=prov)
+    prov_summary = get_provincial_potential_summary()
+    map_center = PROV_CENTERS.get(prov, PROV_CENTERS["ALL"])
+
+    return render_template_string(
+        HTML_TEMPLATE,
+        rows=rows,
+        forecasts=forecasts,
+        prov_summary=prov_summary,
+        map_center=map_center,
+        date_columns=date_list,
+        ref_date=ref_str,
+        session_name=session_name,
+        current_prov=prov,
+        current_view=view,
+        current_source=source,
+        current_sat=sat,
+        stats=stats,
+    )
+
+@app.route("/api/sync")
+def api_sync():
+    ref_d, session_name = get_effective_date_and_session()
+    ref_str = ref_d.strftime("%Y-%m-%d")
+
+    def run_async():
+        try:
+            sync_hotspots_multi(ref_str)
+        except Exception:
+            pass
+        try:
+            update_fire_risk_forecast_multi()
+        except Exception:
+            pass
+
+    t_sync = threading.Thread(target=run_async, daemon=True)
+    t_sync.start()
+
+    return jsonify({"status": "ok", "effective_date": ref_str, "session": session_name})
+
+@app.route("/download-excel")
+def download_excel():
+    prov = request.args.get("prov", "ALL")
+    sat = request.args.get("sat", "ALL")
+    source = request.args.get("source", "ALL_DATA")
+    ref_d, _ = get_effective_date_and_session()
+    ref_str = ref_d.strftime("%Y-%m-%d")
+    out_file = export_to_excel_multi(ref_str, filter_prov=prov, filter_sat=sat, filter_source=source)
+    if os.path.exists(out_file):
+        return send_file(out_file, as_attachment=True, download_name=out_file)
+    return "File Excel belum tersedia", 404
+
+# ==========================================
+# 8. INISIALISASI OTOMATIS (LOKAL & CLOUD)
+# ==========================================
+init_db()
+seed_historical_multi()
+update_fire_risk_forecast_multi()
+
+t = threading.Thread(target=run_scheduler, daemon=True)
+t.start()
+
+try:
+    initial_date, _ = get_effective_date_and_session()
+    export_to_excel_multi(initial_date.strftime("%Y-%m-%d"))
+except Exception:
+    pass
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
