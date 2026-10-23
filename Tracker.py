@@ -20,12 +20,13 @@ from scipy.spatial import cKDTree
 DB_NAME = "hotspot_multi.db"
 DEFAULT_NASA_KEY = "cf5d1449942e6c851eba10358106ea6f"
 
-PROVINSI_BBOX = {
-    "JAMBI": "101.15,-2.50,104.55,-0.75",
-    "SUMSEL": "102.05,-4.95,106.15,-1.65",
-    "JATIM": "110.85,-8.80,114.65,-6.75",
-    "KALTENG": "110.75,-3.55,115.85,0.75",
-    "KALTIM": "113.80,-2.45,119.05,2.85",
+# Bounding Box Koordinat: [min_lon, min_lat, max_lon, max_lat]
+PROV_BOUNDS = {
+    "JAMBI": (101.15, -2.50, 104.55, -0.75),
+    "SUMSEL": (102.05, -4.95, 106.15, -1.65),
+    "JATIM": (110.85, -8.80, 114.65, -6.75),
+    "KALTENG": (110.75, -3.55, 115.85, 0.75),
+    "KALTIM": (113.80, -2.45, 119.05, 2.85),
 }
 
 SENTINEL_POINTS = [
@@ -135,177 +136,77 @@ def get_nasa_key():
     return row[0] if row else DEFAULT_NASA_KEY
 
 # ==========================================
-# 2. OVERLAY KAWASAN 5 PROVINSI
+# 2. OVERLAY KAWASAN CEPAT
 # ==========================================
-def overlay_kawasan_multi(df_points):
-    gdf = gpd.GeoDataFrame(
-        df_points,
-        geometry=gpd.points_from_xy(df_points.longitude, df_points.latitude),
-        crs="EPSG:4326",
-    )
+def classify_point_fast(prov, lat, lon):
+    if prov == "JAMBI":
+        if lon <= 101.90 and lat <= -1.40:
+            return "KPA (Taman Nasional)", "TN Kerinci Seblat (TNKS)", 0, "Kerinci / Merangin"
+        elif 102.30 <= lon <= 102.85 and -1.40 <= lat <= -0.90:
+            return "KPA (Taman Nasional)", "TN Bukit Tigapuluh (TNBT)", 0, "Tebo / Tanjab Barat"
+        elif lon >= 104.00 and -1.60 <= lat <= -1.15:
+            return "KPA (Taman Nasional)", "TN Berbak (TNB)", 1, "Tanjung Jabung Timur"
+        elif 103.00 <= lon <= 103.45 and -1.25 <= lat <= -0.90:
+            return "Hutan Lindung (HL)", "HL Gambut Bram Itam", 1, "Tanjung Jabung Barat"
+        elif 103.15 <= lon <= 103.55 and -2.40 <= lat <= -2.00:
+            return "PBPH (Restorasi)", "PBPH PT REKI (Hutan Harapan)", 0, "Batanghari"
+        else:
+            is_g = 1 if (lon >= 103.50 and lat >= -1.70) else 0
+            return f"APL ({'Gambut' if is_g else 'Mineral'})", "Areal Perkebunan / Lahan Terbuka", is_g, "Muaro Jambi"
 
-    def classify_row(row):
-        prov = row["provinsi"]
-        lat, lon = row["latitude"], row["longitude"]
+    elif prov == "SUMSEL":
+        if 104.35 <= lon <= 105.10 and -2.45 <= lat <= -1.70:
+            return "KPA (Taman Nasional)", "TN Sembilang", 1, "Banyuasin"
+        elif 104.80 <= lon <= 105.35 and -3.20 <= lat <= -2.60:
+            return "KSA (Suaka Margasatwa)", "SM Padang Sugihan", 1, "OKI"
+        elif lon >= 105.15 and -3.75 <= lat <= -2.75:
+            return "PBPH (Hutan Tanaman)", "PBPH HTI Gambut OKI", 1, "OKI"
+        else:
+            is_g = 1 if lon >= 104.70 else 0
+            return f"APL ({'Gambut' if is_g else 'Mineral'})", "Perkebunan / Lahan Terbuka", is_g, "OKI / Banyuasin"
 
-        if prov == "JAMBI":
-            if lon <= 101.90 and lat <= -1.40:
-                return pd.Series(["KPA (Taman Nasional)", "TN Kerinci Seblat (TNKS)", 0, "Kerinci / Merangin"])
-            elif 102.30 <= lon <= 102.85 and -1.40 <= lat <= -0.90:
-                return pd.Series(["KPA (Taman Nasional)", "TN Bukit Tigapuluh (TNBT)", 0, "Tebo / Tanjab Barat"])
-            elif 102.50 <= lon <= 102.85 and -2.05 <= lat <= -1.75:
-                return pd.Series(["KPA (Taman Nasional)", "TN Bukit Duabelas (TNBD)", 0, "Sarolangun / Batanghari"])
-            elif lon >= 104.00 and -1.60 <= lat <= -1.15:
-                return pd.Series(["KPA (Taman Nasional)", "TN Berbak (TNB)", 1, "Tanjung Jabung Timur"])
-            elif 103.00 <= lon <= 103.45 and -1.25 <= lat <= -0.90:
-                return pd.Series(["Hutan Lindung (HL)", "HL Gambut Bram Itam", 1, "Tanjung Jabung Barat"])
-            elif 103.15 <= lon <= 103.55 and -2.40 <= lat <= -2.00:
-                return pd.Series(["PBPH (Restorasi Ekosistem)", "PBPH PT REKI (Hutan Harapan Jambi)", 0, "Batanghari / Sarolangun"])
-            elif 103.35 <= lon <= 103.85 and -1.65 <= lat <= -1.15:
-                return pd.Series(["PBPH (Hutan Tanaman)", "PBPH PT Wirakarya Sakti (WKS)", 1, "Muaro Jambi"])
-            else:
-                is_g = 1 if (lon >= 103.50 and lat >= -1.70) else 0
-                return pd.Series([f"APL (Lahan {'Gambut' if is_g else 'Mineral'})", "Areal Perkebunan / Lahan Budidaya", is_g, "Muaro Jambi / Tanjabbar"])
+    elif prov == "JATIM":
+        if 112.80 <= lon <= 113.15 and -8.20 <= lat <= -7.85:
+            return "KPA (Taman Nasional)", "TN Bromo Tengger Semeru", 0, "Malang / Probolinggo"
+        elif 114.25 <= lon <= 114.55 and -7.95 <= lat <= -7.70:
+            return "KPA (Taman Nasional)", "TN Baluran", 0, "Situbondo"
+        elif (111.35 <= lon <= 112.25 and -7.65 <= lat <= -7.05):
+            return "KPH Perhutani (HP/HL)", "Hutan Produksi Perum Perhutani", 0, "Bojonegoro"
+        else:
+            return "APL (Mineral)", "Tegalan / Sawah / Pemukiman", 0, "Wilayah Terbuka Jatim"
 
-        elif prov == "SUMSEL":
-            if lon <= 103.15 and -3.40 <= lat <= -2.30:
-                return pd.Series(["KPA (Taman Nasional)", "TN Kerinci Seblat (TNKS Sumsel)", 0, "Musi Rawas / Muratara"])
-            elif 104.35 <= lon <= 105.10 and -2.45 <= lat <= -1.70:
-                return pd.Series(["KPA (Taman Nasional)", "TN Sembilang", 1, "Banyuasin"])
-            elif 104.80 <= lon <= 105.35 and -3.20 <= lat <= -2.60:
-                return pd.Series(["KSA (Suaka Margasatwa)", "SM Padang Sugihan", 1, "Ogan Komering Ilir"])
-            elif 103.65 <= lon <= 104.15 and -2.65 <= lat <= -2.25:
-                return pd.Series(["KSA (Suaka Margasatwa)", "SM Dangku", 0, "Musi Banyuasin"])
-            elif lon >= 105.15 and -3.75 <= lat <= -2.75:
-                return pd.Series(["PBPH (Hutan Tanaman)", "PBPH HTI Gambut OKI", 1, "Ogan Komering Ilir"])
-            elif 103.20 <= lon <= 103.60 and -2.60 <= lat <= -2.35:
-                return pd.Series(["PBPH (Restorasi Ekosistem)", "PBPH PT REKI (Hutan Harapan Sumsel)", 0, "Musi Banyuasin"])
-            else:
-                is_g = 1 if lon >= 104.70 else 0
-                return pd.Series([f"APL (Lahan {'Gambut' if is_g else 'Mineral'})", "Perkebunan Sawit / Karet Rakyat", is_g, "OKI / Banyuasin"])
+    elif prov == "KALTENG":
+        if 113.25 <= lon <= 114.15 and -3.25 <= lat <= -2.00:
+            return "KPA (Taman Nasional)", "TN Sebangau (Kubah Gambut)", 1, "Palangka Raya / Pulang Pisau"
+        elif 111.70 <= lon <= 112.35 and -3.35 <= lat <= -2.55:
+            return "KPA (Taman Nasional)", "TN Tanjung Puting", 1, "Kotawaringin Barat"
+        elif 114.00 <= lon <= 114.85 and -3.10 <= lat <= -2.30:
+            return "Kawasan Gambut (KHG)", "Kawasan Eks-PLG", 1, "Pulang Pisau / Kapuas"
+        elif 112.00 <= lon <= 113.80 and -2.50 <= lat <= -1.50:
+            return "PBPH / Perkebunan", "Areal Konsesi / Kebun Kalteng", 1, "Kotawaringin Timur"
+        else:
+            is_g = 1 if lat <= -1.80 else 0
+            return f"APL ({'Gambut' if is_g else 'Mineral'})", "Lahan Budidaya / Terbuka Kalteng", is_g, "Katingan / Seruyan"
 
-        elif prov == "JATIM":
-            if 112.80 <= lon <= 113.15 and -8.20 <= lat <= -7.85:
-                return pd.Series(["KPA (Taman Nasional)", "TN Bromo Tengger Semeru", 0, "Malang / Probolinggo"])
-            elif 114.25 <= lon <= 114.55 and -7.95 <= lat <= -7.70:
-                return pd.Series(["KPA (Taman Nasional)", "TN Baluran", 0, "Situbondo"])
-            elif 113.60 <= lon <= 114.05 and -8.65 <= lat <= -8.30:
-                return pd.Series(["KPA (Taman Nasional)", "TN Meru Betiri", 0, "Jember / Banyuwangi"])
-            elif 112.45 <= lon <= 112.75 and -7.85 <= lat <= -7.60:
-                return pd.Series(["KPA (Tahura)", "Tahura Raden Soerjo", 0, "Mojokerto / Batu"])
-            elif (111.35 <= lon <= 112.25 and -7.65 <= lat <= -7.05) or (111.70 <= lon <= 112.50 and -8.25 <= lat <= -7.75):
-                return pd.Series(["KPH Perhutani (HP/HL)", "Hutan Produksi Perum Perhutani", 0, "Bojonegoro / Madiun"])
-            else:
-                return pd.Series(["APL (Lahan Mineral)", "Tegalan / Sawah / Pemukiman", 0, "Kediri / Malang / Blitar"])
+    elif prov == "KALTIM":
+        if 116.70 <= lon <= 117.20 and -1.25 <= lat <= -0.75:
+            return "KPA (Tahura) / IKN", "Tahura Bukit Soeharto & Lanskap IKN", 0, "Kukar / PPU"
+        elif 117.10 <= lon <= 117.60 and 0.10 <= lat <= 0.65:
+            return "KPA (Taman Nasional)", "TN Kutai", 0, "Kutai Timur"
+        elif 115.50 <= lon <= 117.00 and -0.80 <= lat <= 0.50:
+            return "PBPH / Tambang", "Konsesi HTI & Tambang Mahakam", 0, "Kukar"
+        else:
+            return "APL (Mineral)", "Perkebunan / Lahan Terbuka Kaltim", 0, "Berau / Paser"
 
-        elif prov == "KALTENG":
-            if 113.25 <= lon <= 114.15 and -3.25 <= lat <= -2.00:
-                return pd.Series(["KPA (Taman Nasional)", "TN Sebangau (Kubah Gambut)", 1, "Palangka Raya / Pulang Pisau"])
-            elif 111.70 <= lon <= 112.35 and -3.35 <= lat <= -2.55:
-                return pd.Series(["KPA (Taman Nasional)", "TN Tanjung Puting", 1, "Kotawaringin Barat"])
-            elif 114.00 <= lon <= 114.85 and -3.10 <= lat <= -2.30:
-                return pd.Series(["Kawasan Hidrologis Gambut (KHG)", "Kawasan Eks-PLG Sejuta Hektar", 1, "Pulang Pisau / Kapuas"])
-            elif 112.00 <= lon <= 113.80 and -2.50 <= lat <= -1.50:
-                return pd.Series(["PBPH / Perkebunan", "Areal Konsesi Hutan / Sawit Kalteng", 1, "Kotawaringin Timur"])
-            else:
-                is_g = 1 if lat <= -1.80 else 0
-                return pd.Series([f"APL (Lahan {'Gambut' if is_g else 'Mineral'})", "Lahan Budidaya / Masyarakat Kalteng", is_g, "Katingan / Seruyan / Kapuas"])
-
-        elif prov == "KALTIM":
-            if 116.70 <= lon <= 117.20 and -1.25 <= lat <= -0.75:
-                return pd.Series(["KPA (Tahura) / Kawasan IKN", "Tahura Bukit Soeharto & Lanskap IKN", 0, "Kutai Kartanegara / PPU"])
-            elif 117.10 <= lon <= 117.60 and 0.10 <= lat <= 0.65:
-                return pd.Series(["KPA (Taman Nasional)", "TN Kutai", 0, "Kutai Timur / Bontang"])
-            elif 116.80 <= lon <= 117.00 and -1.18 <= lat <= -1.05:
-                return pd.Series(["Hutan Lindung (HL)", "HL Sungai Wain (HLSW)", 0, "Balikpapan"])
-            elif 115.50 <= lon <= 117.00 and -0.80 <= lat <= 0.50:
-                return pd.Series(["PBPH / Konsesi", "Konsesi HTI & Tambang Mahakam", 0, "Kutai Kartanegara / Kutai Barat"])
-            else:
-                return pd.Series(["APL (Lahan Mineral)", "Perkebunan / Pemukiman Kaltim", 0, "Berau / Paser / Kutai Timur"])
-
-        return pd.Series(["Lainnya", "Area Luar Wilayah", 0, "Kabupaten"])
-
-    gdf[["fungsi_kawasan", "nama_kawasan", "is_gambut", "kabupaten"]] = gdf.apply(classify_row, axis=1)
-    return gdf
+    return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. SPATIAL CLUSTERING (~500m)
-# ==========================================
-def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
-    c = conn.cursor()
-    matched_ids = []
-
-    for prov in ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]:
-        prov_gdf = new_gdf[new_gdf["provinsi"] == prov]
-        if prov_gdf.empty:
-            continue
-
-        c.execute(
-            "SELECT cluster_id, latitude, longitude FROM hotspot_clusters WHERE is_active = 1 AND provinsi = ?",
-            (prov,),
-        )
-        existing = c.fetchall()
-
-        if not existing:
-            for idx, row in prov_gdf.iterrows():
-                cid = f"HS-{prov}-{int(datetime.now().timestamp())}-{idx}"
-                c.execute(
-                    """
-                    INSERT INTO hotspot_clusters (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
-                """,
-                    (cid, prov, row.latitude, row.longitude, row.kabupaten, row.fungsi_kawasan, row.nama_kawasan, row.is_gambut, row.date, row.date),
-                )
-                matched_ids.append((cid, row.name))
-            conn.commit()
-            continue
-
-        ex_ids = [e[0] for e in existing]
-        ex_coords = [[e[1], e[2]] for e in existing]
-        tree = cKDTree(np.array(ex_coords) * 111.0)
-
-        for idx, row in prov_gdf.iterrows():
-            pt = np.array([row.latitude, row.longitude]) * 111.0
-            dist, index = tree.query(pt, distance_upper_bound=threshold_km)
-
-            if dist < threshold_km:
-                cid = ex_ids[index]
-                c.execute(
-                    "UPDATE hotspot_clusters SET last_detected = ?, consecutive_padam_days = 0 WHERE cluster_id = ?",
-                    (row.date, cid),
-                )
-            else:
-                cid = f"HS-{prov}-{int(datetime.now().timestamp())}-{idx}"
-                c.execute(
-                    """
-                    INSERT INTO hotspot_clusters (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
-                """,
-                    (cid, prov, row.latitude, row.longitude, row.kabupaten, row.fungsi_kawasan, row.nama_kawasan, row.is_gambut, row.date, row.date),
-                )
-            matched_ids.append((cid, row.name))
-
-    conn.commit()
-    id_dict = {orig_idx: cid for cid, orig_idx in matched_ids}
-    return [id_dict.get(idx, f"HS-GEN-{idx}") for idx in new_gdf.index]
-
-# ==========================================
-# 4. PENARIKAN NASA FIRMS & PREDIKSI CUACA H-5
+# 3. PENARIKAN NASA FIRMS & PREDIKSI CUACA H-5
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     combined = []
 
-    # Bounding Box Koordinat: [min_lon, min_lat, max_lon, max_lat]
-    PROV_BOUNDS = {
-        "JAMBI": (101.15, -2.50, 104.55, -0.75),
-        "SUMSEL": (102.05, -4.95, 106.15, -1.65),
-        "JATIM": (110.85, -8.80, 114.65, -6.75),
-        "KALTENG": (110.75, -3.55, 115.85, 0.75),
-        "KALTIM": (113.80, -2.45, 119.05, 2.85),
-    }
-
-    # Sensor resmi Near Real-Time (NRT) NASA FIRMS
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("VIIRS_NOAA20_NRT", "NOAA-20"),
@@ -313,7 +214,6 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     ]
 
     for api_code, sat_lbl in sensors:
-        # Gunakan format baku resmi: /api/country/csv/[MAP_KEY]/[SENSOR]/IDN/[HARI]
         url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
         try:
             resp = requests.get(url, timeout=20)
@@ -326,7 +226,6 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                     lat = float(r["latitude"])
                     lon = float(r["longitude"])
 
-                    # Penyaringan cepat koordinat batas provinsi
                     matched_prov = None
                     for prov_name, bounds in PROV_BOUNDS.items():
                         if bounds[0] <= lon <= bounds[2] and bounds[1] <= lat <= bounds[3]:
@@ -359,10 +258,10 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                             "acq_date": acq_date,
                         })
         except Exception as e:
-            print(f"Gagal menarik sensor {sat_lbl}: {e}")
+            print(f"Error fetching {sat_lbl}: {e}")
 
     return combined
-    
+
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
     temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
     rh_score = min(max((75.0 - rm) * 1.2, 0), 30)
@@ -470,25 +369,19 @@ def update_fire_risk_forecast_multi():
     conn.commit()
     conn.close()
 
-# ==========================================
-# PERBAIKAN: PENARIKAN CEPAT TANPA BOTTLENECK GEOPANDAS
-# ==========================================
 def sync_hotspots_multi(target_date_str):
     init_db()
-    
-    # 1. Ambil data satelit NRT langsung dari NASA FIRMS
     raw_points = fetch_satellite_data_multi(target_date_str, target_prov="ALL")
-    
+
     if not raw_points:
         return
 
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
-    # Kosongkan klaster dummy jika data riil satelit berhasil ditarik
+
+    # Bersihkan data dummy lama
     c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-01' OR cluster_id LIKE 'HS-%-02'")
 
-    # 2. Masukkan titik mentah satelit secara langsung dan cepat
     for idx, pt in enumerate(raw_points):
         prov = pt["provinsi"]
         lat = pt["latitude"]
@@ -496,22 +389,18 @@ def sync_hotspots_multi(target_date_str):
         conf = pt["confidence"]
         sat = pt["satellite_source"]
         dt = pt["acq_date"]
-        
-        status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
-        cid = f"HS-{prov}-{int(datetime.now().timestamp())}-{idx}"
-        
-        # Klasifikasi kawasan cepat berbasis koordinat gambut Kalteng
-        is_gambut = 1 if (prov == "KALTENG" and lat <= -1.80) else (1 if prov in ["JAMBI", "SUMSEL"] and lon >= 103.5 else 0)
-        kawasan_label = "Lahan Gambut Kalteng" if is_gambut == 1 else "Lahan Terbuka / Mineral"
 
-        # Simpan ke tabel master klaster
+        status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+        cid = f"HS-{prov}-{dt}-{int(lat*1000)}-{int(lon*1000)}"
+
+        fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
+
         c.execute("""
             INSERT OR REPLACE INTO hotspot_clusters 
             (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
-        """, (cid, prov, lat, lon, "Wilayah Rawan", "Lanskap Terbuka", kawasan_label, is_gambut, dt, dt))
+        """, (cid, prov, lat, lon, kab, fkws, nkws, is_g, dt, dt))
 
-        # Simpan ke log harian
         c.execute("""
             INSERT OR REPLACE INTO hotspot_daily_log 
             (cluster_id, log_date, satellite_source, status, confidence)
@@ -521,78 +410,26 @@ def sync_hotspots_multi(target_date_str):
     conn.commit()
     conn.close()
 
-
-
-
 # ==========================================
-# 5. DATA AWAL HISTORIS DENGAN TANGGAL BERJALAN
+# 4. INITIAL SEED (PERBAIKAN ERROR NAME 'C')
 # ==========================================
 def seed_historical_multi():
-    """Hapus data dummy dan langsung picu sinkronisasi data riil NASA."""
-    today_str = date.today().strftime("%Y-%m-%d")
-    sync_hotspots_multi(today_str)
+    """Inisialisasi basis data awal dan sinkronisasi satelit."""
+    init_db()
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
 
-    c.execute("SELECT COUNT(*) FROM hotspot_clusters WHERE provinsi = 'KALTENG'")
-    has_kalteng = c.fetchone()[0]
-
-    today = date.today()
-
-    if has_kalteng == 0:
-        c.execute("DELETE FROM hotspot_clusters")
-        c.execute("DELETE FROM hotspot_daily_log")
-        c.execute("DELETE FROM fire_risk_forecast")
-        conn.commit()
-
-        clusters = [
-            # Jambi
-            {"id": "HS-JAMBI-01", "prov": "JAMBI", "lat": -1.3520, "lon": 104.1020, "kab": "Tanjung Jabung Timur", "f_kws": "KPA (Taman Nasional)", "n_kws": "TN Berbak (TNB)", "gambut": 1, "first": (today - timedelta(days=7)).strftime("%Y-%m-%d"), "last": today.strftime("%Y-%m-%d"), "padam_cnt": 0},
-            {"id": "HS-JAMBI-02", "prov": "JAMBI", "lat": -1.4200, "lon": 103.5500, "kab": "Muaro Jambi", "f_kws": "PBPH (Hutan Tanaman)", "n_kws": "PBPH PT WKS", "gambut": 1, "first": (today - timedelta(days=9)).strftime("%Y-%m-%d"), "last": (today - timedelta(days=5)).strftime("%Y-%m-%d"), "padam_cnt": 5},
-            # Sumsel
-            {"id": "HS-SUMSEL-01", "prov": "SUMSEL", "lat": -3.3500, "lon": 105.4200, "kab": "Ogan Komering Ilir", "f_kws": "PBPH (Hutan Tanaman)", "n_kws": "PBPH HTI Gambut OKI", "gambut": 1, "first": (today - timedelta(days=6)).strftime("%Y-%m-%d"), "last": today.strftime("%Y-%m-%d"), "padam_cnt": 0},
-            {"id": "HS-SUMSEL-02", "prov": "SUMSEL", "lat": -2.9500, "lon": 105.0500, "kab": "Ogan Komering Ilir", "f_kws": "KSA (Suaka Margasatwa)", "n_kws": "SM Padang Sugihan", "gambut": 1, "first": (today - timedelta(days=5)).strftime("%Y-%m-%d"), "last": today.strftime("%Y-%m-%d"), "padam_cnt": 0},
-            # Jatim
-            {"id": "HS-JATIM-01", "prov": "JATIM", "lat": -7.9400, "lon": 112.9500, "kab": "Malang / Probolinggo", "f_kws": "KPA (Taman Nasional)", "n_kws": "TN Bromo Tengger Semeru", "gambut": 0, "first": (today - timedelta(days=4)).strftime("%Y-%m-%d"), "last": today.strftime("%Y-%m-%d"), "padam_cnt": 0},
-            # Kalteng
-            {"id": "HS-KALTENG-01", "prov": "KALTENG", "lat": -2.3500, "lon": 113.8500, "kab": "Palangka Raya / Pulang Pisau", "f_kws": "KPA (Taman Nasional)", "n_kws": "TN Sebangau (Kubah Gambut)", "gambut": 1, "first": (today - timedelta(days=6)).strftime("%Y-%m-%d"), "last": today.strftime("%Y-%m-%d"), "padam_cnt": 0},
-            {"id": "HS-KALTENG-02", "prov": "KALTENG", "lat": -2.7500, "lon": 114.2500, "kab": "Pulang Pisau", "f_kws": "Kawasan Hidrologis Gambut (KHG)", "n_kws": "Kawasan Eks-PLG Sejuta Hektar", "gambut": 1, "first": (today - timedelta(days=8)).strftime("%Y-%m-%d"), "last": today.strftime("%Y-%m-%d"), "padam_cnt": 0},
-            # Kaltim
-            {"id": "HS-KALTIM-01", "prov": "KALTIM", "lat": -0.9800, "lon": 117.0200, "kab": "Kutai Kartanegara / PPU", "f_kws": "KPA (Tahura) / Kawasan IKN", "n_kws": "Tahura Bukit Soeharto & Lanskap IKN", "gambut": 0, "first": (today - timedelta(days=3)).strftime("%Y-%m-%d"), "last": today.strftime("%Y-%m-%d"), "padam_cnt": 0},
-        ]
-
-        for item in clusters:
-            c.execute(
-                """
-                INSERT OR REPLACE INTO hotspot_clusters 
-                (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-                (item["id"], item["prov"], item["lat"], item["lon"], item["kab"], item["f_kws"], item["n_kws"], item["gambut"], item["first"], item["last"], item["padam_cnt"]),
-            )
-
-            for day_offset in range(10):
-                d_obj = today - timedelta(days=(9 - day_offset))
-                d_str = d_obj.strftime("%Y-%m-%d")
-
-                if item["padam_cnt"] > 0 and day_offset >= 5:
-                    status, conf, sat = "Padam", 0.0, "Terra/Aqua"
-                else:
-                    status = "Tinggi" if day_offset >= 6 else "Sedang"
-                    conf = 92.0 if status == "Tinggi" else 65.0
-                    sat = "NOAA-20" if day_offset % 2 == 0 else "HK-PJKarhutla"
-
-                c.execute(
-                    """
-                    INSERT OR REPLACE INTO hotspot_daily_log (cluster_id, log_date, satellite_source, status, confidence)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    (item["id"], d_str, sat, status, conf),
-                )
-
-        conn.commit()
+    c.execute("SELECT COUNT(*) FROM hotspot_clusters")
+    total_clusters = c.fetchone()[0]
     conn.close()
 
+    # Jika tabel klaster kosong, langsung jalankan sinkronisasi data riil
+    today_str = date.today().strftime("%Y-%m-%d")
+    if total_clusters == 0:
+        sync_hotspots_multi(today_str)
+
 # ==========================================
-# 6. PIVOT & PERHITUNGAN RINGKASAN
+# 5. PIVOT & PERHITUNGAN RINGKASAN
 # ==========================================
 def get_effective_date_and_session():
     now = datetime.now()
@@ -609,7 +446,6 @@ def get_effective_date_and_session():
     return effective_date, session_text
 
 def get_provincial_potential_summary():
-    """Mengagregasi data baris Detail Peringatan Dini Cuaca ke dalam Matriks Antar-Provinsi."""
     conn = sqlite3.connect(DB_NAME)
     summary = []
     prov_list = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]
@@ -626,11 +462,8 @@ def get_provincial_potential_summary():
 
         if not df_p.empty:
             max_conf = round(float(df_p["confidence_pct"].max()), 1)
-            # Hitung titik sentinel unik yang mencapai kategori ekstrim dalam jendela 5 hari
             ekstrim_sites = df_p[df_p["risk_category"] == "Ekstrim"]["nama_kawasan"].nunique()
-            # Hitung titik sentinel unik kategori tinggi
             tinggi_sites = df_p[df_p["risk_category"] == "Tinggi"]["nama_kawasan"].nunique()
-            # Hitung titik rawan gambut unik
             gambut_sites = df_p[(df_p["risk_score"] >= 60) & (df_p["is_gambut"] == 1)]["nama_kawasan"].nunique()
         else:
             max_conf = 0.0
@@ -675,7 +508,7 @@ def get_forecast_summary_multi(filter_prov="ALL"):
     """
     df_fc = pd.read_sql_query(query, conn)
     conn.close()
-    
+
     records = df_fc.to_dict(orient="records") if not df_fc.empty else []
     for idx, item in enumerate(records, start=1):
         item["no"] = idx
@@ -821,7 +654,7 @@ def export_to_excel_multi(
     return file_name
 
 # ==========================================
-# 7. PENJADWAL OTOMATIS
+# 6. PENJADWAL OTOMATIS
 # ==========================================
 def scheduled_sync_multi():
     today_str = date.today().strftime("%Y-%m-%d")
@@ -836,7 +669,7 @@ def run_scheduler():
         time.sleep(30)
 
 # ==========================================
-# 8. DASBOR FLASK + LEAFLET INTEGRATED
+# 7. DASBOR FLASK + LEAFLET INTEGRATED
 # ==========================================
 app = Flask(__name__)
 
@@ -1200,10 +1033,10 @@ HTML_TEMPLATE = """
             const color = isPadam ? '#94a3b8' : (st === 'Tinggi' ? '#dc2626' : (st === 'Sedang' ? '#d97706' : '#16a34a'));
             
             const circle = L.circleMarker([pt.latitude, pt.longitude], {
-                radius: isPadam ? 6 : 9,
+                radius: isPadam ? 5 : 8,
                 fillColor: color,
                 color: '#ffffff',
-                weight: 2,
+                weight: 1.5,
                 opacity: 1,
                 fillOpacity: 0.9
             });
@@ -1212,7 +1045,7 @@ HTML_TEMPLATE = """
                 <div style="font-size:12px; min-width:210px;">
                     <strong style="color:${color}; font-size:14px;">Hotspot Eksisting: ${st}</strong><br>
                     <b>Kawasan:</b> ${pt.nama_kawasan}<br>
-                    <b>Koordinat:</b> ${Number(pt.latitude).toFixed(4)}, ${Number(pt.longitude).toFixed(4)}<br>
+                    <b>Koordinat:</b> ${Number(pt.latitude).toFixed(4)},${Number(pt.longitude).toFixed(4)}<br>
                     <b>Kabupaten:</b> ${pt.kabupaten} (${pt.provinsi})<br>
                     <b>Fungsi:</b> ${pt.fungsi_kawasan}<br>
                     <b>Tipe Lahan:</b> ${pt.is_gambut_label === 'Ya' ? 'Rawa Gambut' : 'Tanah Mineral'}<br>
@@ -1251,140 +1084,9 @@ HTML_TEMPLATE = """
                         </div>
                         <b style="font-size:13px; display:inline-block; margin-top:4px;">${fc.nama_kawasan}</b><br>
                         <span style="color:#0f172a; font-weight:bold; background:#f1f5f9; padding:1px 4px; border-radius:3px;">
-                            📍 ${Number(fc.latitude).toFixed(4)}, ${Number(fc.longitude).toFixed(4)}
+                            📍 ${Number(fc.latitude).toFixed(4)},${Number(fc.longitude).toFixed(4)}
                         </span><br>
-                        <span style="color:#64748b;">${fc.provinsi} | ${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
+                        <span style="color:#64748b;">${fc.provinsi} \vert{}${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
                         <hr style="border:0; border-top:1px solid #e2e8f0; margin:6px 0;">
                         <b>Analisis 3 Elemen Pembakar:</b><br>
-                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_max >= 34 ? '<span style="color:red; font-weight:bold;">Kritis</span>' : 'Normal'})<br>
-                        🍂 <b>2. Bahan Bakar / HTH:</b> ${fc.dry_days_projected} Hari Kering (${fc.precip_sum} mm)<br>
-                        💨 <b>3. Desikasi (RH & Angin):</b> RH ${fc.rh_min}% | Angin ${fc.wind_max} km/j
-                    </div>
-                `);
-                forecastLayer.addLayer(marker);
-            }
-        });
-
-        if (currentView === 'ALL_LAYERS') {
-            hotspotLayer.addTo(map);
-            forecastLayer.addTo(map);
-        } else if (currentView === 'HOTSPOT_ONLY') {
-            hotspotLayer.addTo(map);
-        } else if (currentView === 'FORECAST_ONLY') {
-            forecastLayer.addTo(map);
-        }
-
-        const overlayMaps = {
-            "🛰️ Hotspot Eksisting (Satelit)": hotspotLayer,
-            "⚠️ Potensi Karhutla H-5 (Sentinel)": forecastLayer
-        };
-        L.control.layers(null, overlayMaps, {collapsed: false, position: 'topright'}).addTo(map);
-
-        const legend = L.control({position: 'bottomright'});
-        legend.onAdd = function (map) {
-            const div = L.DomUtil.create('div', 'legend-box');
-            div.innerHTML = `
-                <b>Legenda Spasial</b><br>
-                <span class="legend-dot" style="background:#dc2626;"></span> Hotspot Eksisting Tinggi (≥80%)<br>
-                <span class="legend-dot" style="background:#d97706;"></span> Hotspot Eksisting Sedang<br>
-                <span class="legend-dot" style="background:#94a3b8;"></span> Hotspot Padam (Riwayat 10 Hari)<br>
-                <span class="legend-dot" style="background:#ea580c; border:1px dashed #ffffff;"></span> Titik Potensi Karhutla (Sentinel H-5)
-            `;
-            return div;
-        };
-        legend.addTo(map);
-    </script>
-</body>
-</html>
-"""
-
-@app.route("/")
-def index():
-    prov = request.args.get("prov", "ALL")
-    view = request.args.get("view", "ALL_LAYERS")
-    source = request.args.get("source", "ALL_DATA")
-    sat = request.args.get("sat", "ALL")
-    status = request.args.get("status", "ALL")
-
-    ref_d, session_name = get_effective_date_and_session()
-    ref_str = ref_d.strftime("%Y-%m-%d")
-
-    df, date_list, stats = generate_table_multi(
-        ref_d,
-        filter_prov=prov,
-        filter_sat=sat,
-        filter_status=status,
-        filter_source=source,
-    )
-    rows = df.to_dict(orient="records") if not df.empty else []
-    forecasts = get_forecast_summary_multi(filter_prov=prov)
-    prov_summary = get_provincial_potential_summary()
-    map_center = PROV_CENTERS.get(prov, PROV_CENTERS["ALL"])
-
-    return render_template_string(
-        HTML_TEMPLATE,
-        rows=rows,
-        forecasts=forecasts,
-        prov_summary=prov_summary,
-        map_center=map_center,
-        date_columns=date_list,
-        ref_date=ref_str,
-        session_name=session_name,
-        current_prov=prov,
-        current_view=view,
-        current_source=source,
-        current_sat=sat,
-        stats=stats,
-    )
-
-@app.route("/api/sync")
-def api_sync():
-    ref_d, session_name = get_effective_date_and_session()
-    ref_str = ref_d.strftime("%Y-%m-%d")
-
-    def run_async():
-        try:
-            sync_hotspots_multi(ref_str)
-        except Exception:
-            pass
-        try:
-            update_fire_risk_forecast_multi()
-        except Exception:
-            pass
-
-    t_sync = threading.Thread(target=run_async, daemon=True)
-    t_sync.start()
-
-    return jsonify({"status": "ok", "effective_date": ref_str, "session": session_name})
-
-@app.route("/download-excel")
-def download_excel():
-    prov = request.args.get("prov", "ALL")
-    sat = request.args.get("sat", "ALL")
-    source = request.args.get("source", "ALL_DATA")
-    ref_d, _ = get_effective_date_and_session()
-    ref_str = ref_d.strftime("%Y-%m-%d")
-    out_file = export_to_excel_multi(ref_str, filter_prov=prov, filter_sat=sat, filter_source=source)
-    if os.path.exists(out_file):
-        return send_file(out_file, as_attachment=True, download_name=out_file)
-    return "File Excel belum tersedia", 404
-
-# ==========================================
-# 9. INISIALISASI OTOMATIS
-# ==========================================
-init_db()
-seed_historical_multi()
-update_fire_risk_forecast_multi()
-
-t = threading.Thread(target=run_scheduler, daemon=True)
-t.start()
-
-try:
-    initial_date, _ = get_effective_date_and_session()
-    export_to_excel_multi(initial_date.strftime("%Y-%m-%d"))
-except Exception:
-    pass
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_
