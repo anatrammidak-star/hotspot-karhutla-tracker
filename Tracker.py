@@ -16,7 +16,6 @@ import requests
 DB_NAME = "hotspot_multi.db"
 DEFAULT_NASA_KEY = "cf5d1449942e6c851eba10358106ea6f"
 
-# Batas Geografis (min_lon, min_lat, max_lon, max_lat)
 PROV_BOUNDS = {
     "JAMBI": (101.15, -2.50, 104.55, -0.75),
     "SUMSEL": (102.05, -4.95, 106.15, -1.65),
@@ -57,11 +56,20 @@ PROV_CENTERS = {
     "KALTIM": [0.3, 116.8, 7],
 }
 
+HEADERS_REQ = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 # ==========================================
-# 1. DATABASE LOKAL
+# 1. DATABASE LOKAL DENGAN WAL MODE
 # ==========================================
+def get_db_connection():
+    conn = sqlite3.connect(DB_NAME, timeout=45)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS hotspot_clusters (
@@ -124,7 +132,7 @@ def init_db():
     conn.close()
 
 def get_nasa_key():
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT value FROM app_settings WHERE key = 'nasa_key'")
     row = c.fetchone()
@@ -185,7 +193,7 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN DATA SATELLITE RIIL (KUNCI ASLI RIBUAN TITIK)
+# 3. PENARIKAN NASA FIRMS & CUACA H-5
 # ==========================================
 def parse_and_append_hotspots(csv_content, sat_lbl, default_date, target_prov, combined):
     lines = csv_content.strip().split("\n")
@@ -238,7 +246,7 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     combined = []
 
-    # Jalur 1: Endpoint Country Resmi NASA FIRMS API
+    # 1. Jalur Utama: API NASA FIRMS Resmi (Key-Based)
     api_sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("VIIRS_NOAA20_NRT", "NOAA-20"),
@@ -247,15 +255,14 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     for api_code, sat_lbl in api_sensors:
         url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
         try:
-            resp = requests.get(url, timeout=12)
+            resp = requests.get(url, headers=HEADERS_REQ, timeout=12)
             if resp.status_code == 200:
                 parse_and_append_hotspots(resp.text, sat_lbl, target_date_str, target_prov, combined)
         except Exception as e:
             print(f"Jalur API {sat_lbl} gagal: {e}")
 
-    # Jalur 2: Feed NRT Bebas Kuota (Menjamin ribuan titik selalu masuk jika Jalur 1 mencapai kuota)
+    # 2. Jalur Terbuka NRT SouthEast Asia (Menjamin data masuk tanpa terhalang limit API key)
     if len(combined) == 0:
-        print("--> Mengaktifkan Feed Arsip NASA FIRMS NRT 24-48 Jam...")
         open_feeds = [
             ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_SouthEast_Asia_24h.csv", "SNPP"),
             ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_SouthEast_Asia_24h.csv", "NOAA-20"),
@@ -263,13 +270,13 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
         ]
         for f_url, f_lbl in open_feeds:
             try:
-                f_resp = requests.get(f_url, timeout=15)
+                f_resp = requests.get(f_url, headers=HEADERS_REQ, timeout=15)
                 if f_resp.status_code == 200:
                     parse_and_append_hotspots(f_resp.text, f_lbl, target_date_str, target_prov, combined)
             except Exception as e:
                 print(f"Jalur Open Feed {f_lbl} gagal: {e}")
 
-    print(f"--> [TOTAL DATA SATELIT MASUK]: {len(combined)} titik koordinat.")
+    print(f"--> [TOTAL DATA SATELIT MASUK]: {len(combined)} titik.")
     return combined
 
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
@@ -331,7 +338,7 @@ def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
     )
 
 def update_fire_risk_forecast_multi():
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     today = date.today()
 
     for item in SENTINEL_POINTS:
@@ -343,7 +350,7 @@ def update_fire_risk_forecast_multi():
         )
         fetched_successfully = False
         try:
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, headers=HEADERS_REQ, timeout=5)
             if r.status_code == 200:
                 data = r.json().get("daily", {})
                 times = data.get("time", [])
@@ -386,10 +393,10 @@ def sync_hotspots_multi(target_date_str):
     if not raw_points:
         return 0
 
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     c = conn.cursor()
 
-    # Bersihkan data dummy 10 titik seketika data satelit riil masuk
+    # Bersihkan data dummy 10 titik seketika data satelit riil terbukti masuk
     c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
     c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
 
@@ -426,7 +433,7 @@ def sync_hotspots_multi(target_date_str):
 # ==========================================
 def seed_historical_multi():
     init_db()
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     c = conn.cursor()
 
     c.execute("SELECT COUNT(*) FROM hotspot_clusters")
@@ -489,7 +496,7 @@ def get_effective_date_and_session():
     return effective_date, session_text
 
 def get_provincial_potential_summary():
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     summary = []
     prov_list = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"]
 
@@ -541,7 +548,7 @@ def get_provincial_potential_summary():
     return summary
 
 def get_forecast_summary_multi(filter_prov="ALL"):
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     prov_where = "" if filter_prov == "ALL" else f"WHERE provinsi = '{filter_prov}'"
     query = f"""
         SELECT provinsi, nama_kawasan, latitude, longitude, forecast_date, temp_max, rh_min, precip_sum, wind_max, is_gambut, risk_score, risk_category, confidence_pct, confidence_label, dry_days_projected
@@ -567,7 +574,7 @@ def generate_table_multi(
     date_list = [(ref_date - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(9, -1, -1)]
     min_date = date_list[0]
 
-    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn = get_db_connection()
     prov_where = "" if filter_prov == "ALL" else f"AND provinsi = '{filter_prov}'"
     df_clusters = pd.read_sql_query(
         f"SELECT cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut FROM hotspot_clusters WHERE is_active = 1 {prov_where}",
@@ -684,7 +691,7 @@ def generate_table_multi(
 
     merged.insert(0, "No", range(1, len(merged) + 1))
     
-    # Ambil maksimal 300 titik teratas khusus untuk visualisasi peta
+    # Ambil maksimal 300 titik teratas untuk visualisasi peta
     map_df = merged.head(300)
     summary_stats["map_total"] = len(map_df)
 
@@ -1223,6 +1230,9 @@ init_db()
 def startup_tasks():
     time.sleep(1)
     seed_historical_multi()
+    # Otomatis langsung picu sinkronisasi satelit riil begitu server menyala
+    today_str = date.today().strftime("%Y-%m-%d")
+    sync_hotspots_multi(today_str)
     update_fire_risk_forecast_multi()
 
 threading.Thread(target=startup_tasks, daemon=True).start()
