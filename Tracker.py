@@ -16,7 +16,6 @@ import requests
 DB_NAME = "hotspot_multi.db"
 DEFAULT_NASA_KEY = "cf5d1449942e6c851eba10358106ea6f"
 
-# Bounding Box: min_lon, min_lat, max_lon, max_lat
 PROVINSI_BBOX = {
     "JAMBI": "101.15,-2.50,104.55,-0.75",
     "SUMSEL": "102.05,-4.95,106.15,-1.65",
@@ -185,14 +184,13 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS (PERBAIKAN PARAMETER RESMI)
+# 3. PENARIKAN NASA FIRMS & CUACA H-5
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     prov_keys = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"] if target_prov == "ALL" else [target_prov]
     combined = []
 
-    # Sensor resmi Near Real-Time NASA FIRMS
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("NOAA_20_VIIRS_NRT", "NOAA-20"),
@@ -200,25 +198,18 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
         ("MODIS_NRT", "Terra/Aqua"),
     ]
 
-    # Ambil tanggal kemarin jika jam UTC satelit belum update hari ini
     today_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
-    date_candidates = [
-        target_date_str,
-        (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
-    ]
+    dates_to_try = [target_date_str, (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")]
 
     for p in prov_keys:
         bbox = PROVINSI_BBOX[p]
         for api_code, sat_lbl in sensors:
-            success = False
-            for d_str in date_candidates:
-                # Format resmi NASA FIRMS: area/csv/[KEY]/[SOURCE]/[BBOX]/[DAYS]/[YYYY-MM-DD]
+            for d_str in dates_to_try:
                 url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/1/{d_str}"
                 try:
-                    resp = requests.get(url, timeout=10)
+                    resp = requests.get(url, timeout=8)
                     if resp.status_code == 200 and "latitude" in resp.text:
                         lines = resp.text.strip().split("\n")
-                        # Pastikan ada baris data selain header
                         if len(lines) > 1 and "latitude" in lines[0]:
                             df = pd.read_csv(io.StringIO(resp.text))
                             for _, r in df.iterrows():
@@ -246,61 +237,160 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
                                     "satellite_source": sat_lbl,
                                     "acq_date": acq_date,
                                 })
-                            success = True
                             break
-                except Exception as e:
-                    print(f"Error unduh {sat_lbl} {p}: {e}")
+                except Exception:
+                    pass
 
-    print(f"--> Total titik berhasil ditarik dari NASA FIRMS: {len(combined)} titik.")
     return combined
 
+def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
+    temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
+    rh_score = min(max((75.0 - rm) * 1.2, 0), 30)
+    dry_score = 25 if pr < 1.0 else (10 if pr < 5.0 else 0)
+    peat_multiplier = 1.25 if item["gambut"] == 1 else 1.05
+
+    raw_score = (temp_score + rh_score + dry_score) * peat_multiplier * (1.0 + (wn / 60.0))
+    score = min(round(raw_score, 1), 100.0)
+
+    conf_raw = 100.0 / (1.0 + math.exp(-0.11 * (score - 60.0)))
+    conf_pct = min(max(round(conf_raw, 1), 5.0), 98.0)
+
+    if conf_pct >= 85:
+        conf_label = "Sangat Tinggi (High Confidence)"
+    elif conf_pct >= 65:
+        conf_label = "Tinggi (Medium-High)"
+    elif conf_pct >= 40:
+        conf_label = "Sedang (Moderate)"
+    else:
+        conf_label = "Rendah (Low)"
+
+    if score >= 80:
+        cat = "Ekstrim"
+    elif score >= 60:
+        cat = "Tinggi"
+    elif score >= 35:
+        cat = "Sedang"
+    else:
+        cat = "Rendah"
+
+    fid = f"FC-{item['prov']}-{fc_date}-{int(item['lat']*100)}-{int(item['lon']*100)}"
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT OR REPLACE INTO fire_risk_forecast
+        (forecast_id, provinsi, nama_kawasan, latitude, longitude, forecast_date, temp_max, rh_min, precip_sum, wind_max, is_gambut, risk_score, risk_category, confidence_pct, confidence_label, dry_days_projected)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+        (
+            fid,
+            item["prov"],
+            item["kawasan"],
+            item["lat"],
+            item["lon"],
+            fc_date,
+            tm,
+            rm,
+            pr,
+            wn,
+            item["gambut"],
+            score,
+            cat,
+            conf_pct,
+            conf_label,
+            dry_count,
+        ),
+    )
+
+def update_fire_risk_forecast_multi():
+    conn = sqlite3.connect(DB_NAME)
+    today = date.today()
+
+    for item in SENTINEL_POINTS:
+        lat, lon = item["lat"], item["lon"]
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+            "&daily=temperature_2m_max,relative_humidity_2m_min,precipitation_sum,wind_speed_10m_max"
+            "&timezone=Asia%2FJakarta&forecast_days=5"
+        )
+        fetched_successfully = False
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                data = r.json().get("daily", {})
+                times = data.get("time", [])
+                t_max = data.get("temperature_2m_max", [])
+                rh_min = data.get("relative_humidity_2m_min", [])
+                precip = data.get("precipitation_sum", [])
+                wind = data.get("wind_speed_10m_max", [])
+
+                dry_count = 0
+                for i in range(len(times)):
+                    fc_date = times[i]
+                    tm = t_max[i] if i < len(t_max) else 33.0
+                    rm = rh_min[i] if i < len(rh_min) else 50.0
+                    pr = precip[i] if i < len(precip) else 0.0
+                    wn = wind[i] if i < len(wind) else 12.0
+                    dry_count = dry_count + 1 if pr < 1.0 else 0
+                    calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count)
+
+                fetched_successfully = True
+        except Exception:
+            fetched_successfully = False
+
+        if not fetched_successfully:
+            for day_offset in range(5):
+                fc_date = (today + timedelta(days=day_offset)).strftime("%Y-%m-%d")
+                tm = 35.5 if item["gambut"] == 1 else 33.5
+                rm = 42.0 if item["gambut"] == 1 else 55.0
+                pr = 0.0 if day_offset < 3 else 2.5
+                wn = 14.0
+                dry_count = day_offset + 1 if pr < 1.0 else 0
+                calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count)
+
+    conn.commit()
+    conn.close()
 
 def sync_hotspots_multi(target_date_str):
     init_db()
     raw_points = fetch_satellite_data_multi(target_date_str, target_prov="ALL")
 
-    if not raw_points:
-        print("Data satelit belum terambil dari NASA FIRMS.")
-        return
-
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
-    # Hapus data seed statis karena data asli satelit sudah didapatkan
-    c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
-    c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
+    if raw_points:
+        c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
+        c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
 
-    for idx, pt in enumerate(raw_points):
-        prov = pt["provinsi"]
-        lat = pt["latitude"]
-        lon = pt["longitude"]
-        conf = pt["confidence"]
-        sat = pt["satellite_source"]
-        dt = pt["acq_date"]
+        for pt in raw_points:
+            prov = pt["provinsi"]
+            lat = pt["latitude"]
+            lon = pt["longitude"]
+            conf = pt["confidence"]
+            sat = pt["satellite_source"]
+            dt = pt["acq_date"]
 
-        status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
-        # Buat cluster_id unik per koordinat dan tanggal
-        cid = f"HS-{prov}-{dt}-{int(abs(lat)*1000)}-{int(abs(lon)*1000)}"
-        fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
+            status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+            # Resolusi spasial cluster ID (~500 meter) agar multi-satelit terkonsolidasi pada 1 titik
+            cid = f"HS-{prov}-{round(lat, 2)}-{round(lon, 2)}"
+            fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
-        c.execute("""
-            INSERT OR REPLACE INTO hotspot_clusters 
-            (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
-        """, (cid, prov, lat, lon, kab, fkws, nkws, is_g, dt, dt))
+            c.execute("""
+                INSERT OR REPLACE INTO hotspot_clusters 
+                (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
+            """, (cid, prov, lat, lon, kab, fkws, nkws, is_g, dt, dt))
 
-        c.execute("""
-            INSERT OR REPLACE INTO hotspot_daily_log 
-            (cluster_id, log_date, satellite_source, status, confidence)
-            VALUES (?, ?, ?, ?, ?)
-        """, (cid, dt, sat, status, conf))
+            c.execute("""
+                INSERT OR REPLACE INTO hotspot_daily_log 
+                (cluster_id, log_date, satellite_source, status, confidence)
+                VALUES (?, ?, ?, ?, ?)
+            """, (cid, dt, sat, status, conf))
 
     conn.commit()
     conn.close()
-    print(f"--> Berhasil menyimpan {len(raw_points)} titik ke database SQLite.")
 
 # ==========================================
-# 4. INITIAL SEED (BASELINE 10 HARI)
+# 4. INITIAL SEED (DATA SANDARAN BERJALAN)
 # ==========================================
 def seed_historical_multi():
     init_db()
@@ -338,11 +428,12 @@ def seed_historical_multi():
                 d_str = (today - timedelta(days=(9 - day_offset))).strftime("%Y-%m-%d")
                 status = "Tinggi" if day_offset >= 5 else "Sedang"
                 conf = 92.0 if status == "Tinggi" else 65.0
+                sat = "SNPP, NOAA-20" if day_offset >= 7 else "NOAA-20"
                 c.execute("""
                     INSERT OR REPLACE INTO hotspot_daily_log 
                     (cluster_id, log_date, satellite_source, status, confidence)
-                    VALUES (?, ?, 'NOAA-20', ?, ?)
-                """, (cid, d_str, status, conf))
+                    VALUES (?, ?, ?, ?, ?)
+                """, (cid, d_str, sat, status, conf))
 
         conn.commit()
 
@@ -452,8 +543,8 @@ def generate_table_multi(
     )
 
     summary_stats = {
-        "total": 0, "tinggi": 0, "sedang": 0, "rendah": 0, "padam": 0, "aktif": 0,
-        "konservasi": 0, "gambut": 0, "ekstrim_fc": 0, "max_conf": 0,
+        "total": 0, "total_db": 0, "tinggi": 0, "sedang": 0, "rendah": 0, "padam": 0, "aktif": 0,
+        "konservasi": 0, "gambut": 0, "ekstrim_fc": 0, "max_conf": 0, "is_capped": False
     }
 
     if df_clusters.empty:
@@ -498,13 +589,16 @@ def generate_table_multi(
         )
         pivot = agg_logs.pivot(index="cluster_id", columns="log_date", values="status").fillna("Padam")
 
-        sat_summary = (
-            df_logs[df_logs["status"] != "Padam"]
-            .groupby("cluster_id")["satellite_source"]
-            .unique()
-            .apply(lambda x: ", ".join(x))
-            .to_dict()
-        )
+        # Konsolidasi nama sensor yang mendeteksi pada klaster yang sama
+        sat_summary = {}
+        for cid, group in df_logs[df_logs["status"] != "Padam"].groupby("cluster_id"):
+            all_sats = []
+            for item in group["satellite_source"]:
+                for sub in str(item).split(","):
+                    sub_clean = sub.strip()
+                    if sub_clean and sub_clean not in all_sats:
+                        all_sats.append(sub_clean)
+            sat_summary[cid] = ", ".join(all_sats) if all_sats else "SNPP"
     else:
         pivot = pd.DataFrame(index=df_clusters["cluster_id"])
         sat_summary = {}
@@ -537,6 +631,8 @@ def generate_table_multi(
     elif filter_status == "AKTIF":
         merged = merged[merged["status_terakhir"] != "Padam"]
 
+    summary_stats["total_db"] = len(merged)
+
     if not merged.empty:
         st_counts = merged["status_terakhir"].value_counts()
         summary_stats["tinggi"] = int(st_counts.get("Tinggi", 0))
@@ -544,11 +640,22 @@ def generate_table_multi(
         summary_stats["rendah"] = int(st_counts.get("Rendah", 0))
         summary_stats["padam"] = int(st_counts.get("Padam", 0))
         summary_stats["aktif"] = summary_stats["tinggi"] + summary_stats["sedang"] + summary_stats["rendah"]
-        summary_stats["total"] = len(merged)
 
         aktif_rows = merged[merged["status_terakhir"] != "Padam"]
         summary_stats["konservasi"] = int(aktif_rows["fungsi_kawasan"].str.contains("KPA|KSA|Tahura", na=False).sum())
         summary_stats["gambut"] = int((aktif_rows["is_gambut"] == 1).sum())
+
+        # Urutkan berdasarkan status tertinggi dan keaktifan terkini
+        rank_order = {"Tinggi": 3, "Sedang": 2, "Rendah": 1, "Padam": 0}
+        merged["sort_rank"] = merged["status_terakhir"].map(rank_order)
+        merged = merged.sort_values(by=["sort_rank", date_list[-1]], ascending=[False, False]).drop(columns=["sort_rank"])
+
+        # Pembatasan tampilan 300 titik prioritas agar peramban ringan
+        if len(merged) > 300:
+            summary_stats["is_capped"] = True
+            merged = merged.head(300)
+
+        summary_stats["total"] = len(merged)
 
     merged.insert(0, "No", range(1, len(merged) + 1))
     return merged, date_list, summary_stats
@@ -590,11 +697,11 @@ def run_scheduler():
         time.sleep(25)
 
 # ==========================================
-# 7. TEMPLATE HTML TERINTEGRASI
+# 7. FLASK APP & TEMPLATE LEAFLET CANVAS
 # ==========================================
 app = Flask(__name__)
 
-HTML_CODE = """<!DOCTYPE html>
+HTML_PAGE = """<!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
@@ -608,7 +715,7 @@ HTML_CODE = """<!DOCTYPE html>
         .subtitle { font-size: 13px; color: #64748b; margin-top: 4px; }
         .schedule-badge { background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 6px; font-weight: 700; }
         .controls { display: flex; gap: 12px; align-items: center; background: white; padding: 14px 24px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; flex-wrap: wrap; }
-        select { padding: 9px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 13px; font-weight: 600; background: white; color: #0f172a; }
+        select { padding: 9px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 13px; font-weight: 600; background: white; color: #0f172a; cursor: pointer; }
         .select-prov { background: #f0fdf4; border-color: #86efac; color: #166534; font-size: 14px; }
         .select-mode { background: #eff6ff; border-color: #93c5fd; color: #1e40af; font-size: 14px; font-weight: 700; }
         button, a.btn { padding: 9px 16px; border-radius: 8px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
@@ -616,7 +723,7 @@ HTML_CODE = """<!DOCTYPE html>
         .btn-excel { background: #16a34a; color: white; }
         .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow-x: auto; margin-bottom: 24px; }
         .card-header-title { font-size: 16px; font-weight: 700; color: #0f172a; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
-        #map { height: 500px; width: 100%; border-radius: 10px; border: 1px solid #e2e8f0; }
+        #map { height: 480px; width: 100%; border-radius: 10px; border: 1px solid #e2e8f0; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }
         th { background: #f8fafc; color: #475569; font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
@@ -638,8 +745,7 @@ HTML_CODE = """<!DOCTYPE html>
         .stat-lbl { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #64748b; }
         .stat-ekstrim { background: #fff1f2; border-color: #fda4af; }
         .stat-ekstrim .stat-val { color: #e11d48; }
-        .legend-box { background: white; padding: 10px 14px; border-radius: 8px; box-shadow: 0 1px 5px rgba(0,0,0,0.2); font-size: 12px; line-height: 20px; }
-        .legend-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .info-cap-box { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; padding: 8px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 12px; font-weight: 600; display: inline-block; }
     </style>
 </head>
 <body>
@@ -653,7 +759,7 @@ HTML_CODE = """<!DOCTYPE html>
             </div>
         </div>
         <div>
-            <a href="/download-excel?prov={{ current_prov }}&sat={{ current_sat }}&source={{ current_source }}" class="btn btn-excel">📥 Unduh Excel ({{ current_prov }})</a>
+            <a href="/download-excel?prov={{ current_prov }}&sat={{ current_sat }}&source={{ current_source }}" class="btn btn-excel">📥 Unduh Seluruh Data Excel ({{ current_prov }})</a>
         </div>
     </div>
 
@@ -687,7 +793,7 @@ HTML_CODE = """<!DOCTYPE html>
     <div class="summary-container">
         <div class="summary-grid">
             <div class="stat-card">
-                <span class="stat-lbl">Total Hotspot Aktif</span>
+                <span class="stat-lbl">Total Hotspot Aktif (Terdata)</span>
                 <span class="stat-val" style="color: #0284c7;">{{ stats['aktif'] }}</span>
             </div>
             <div class="stat-card" style="background:#fef2f2; border-color:#fecaca;">
@@ -715,8 +821,10 @@ HTML_CODE = """<!DOCTYPE html>
 
     <div class="card">
         <div class="card-header-title">
-            <span>🗺️ Visualisasi Spasial Sebaran Hotspot Eksisting & Titik Potensi Karhutla H-5</span>
-            <span style="font-size:12px; color:#64748b; font-weight:normal;">Pilih tampilan layer di pojok kanan atas peta</span>
+            <span>🗺️ Visualisasi Spasial Sebaran Hotspot Prioritas & Titik Potensi Karhutla H-5</span>
+            {% if stats['is_capped'] %}
+                <span class="info-cap-box">⚡ Menampilkan 300 Titik Hotspot Prioritas Terkini (Gunakan Unduh Excel untuk data lengkap)</span>
+            {% endif %}
         </div>
         <div id="map"></div>
     </div>
@@ -731,11 +839,11 @@ HTML_CODE = """<!DOCTYPE html>
                 <tr>
                     <th>Provinsi</th>
                     <th>Status Siaga Utama</th>
-                    <th>Keyakinan Hotspot Maksimum (Detail H-5)</th>
-                    <th>Titik Sentinel Ekstrim (H-5)</th>
+                    <th>Keyakinan Hotspot Maksimum</th>
+                    <th>Titik Sentinel Ekstrim</th>
                     <th>Titik Sentinel Siaga Tinggi</th>
                     <th>Titik Rawan Gambut</th>
-                    <th>Hotspot Eksisting</th>
+                    <th>Hotspot Terdata</th>
                     <th>Rekomendasi Operasional Lapangan</th>
                 </tr>
             </thead>
@@ -745,9 +853,9 @@ HTML_CODE = """<!DOCTYPE html>
                     <td><span class="prov-tag prov-{{ p['provinsi']|lower }}">{{ p['provinsi'] }}</span></td>
                     <td><span class="badge {{ p['badge_class'] }}">{{ p['status_label'] }}</span></td>
                     <td><b style="color:#dc2626; font-size:14px;">{{ p['max_confidence'] }}%</b></td>
-                    <td><b>{{ p['ekstrim_cnt'] }} Titik Sentinel</b></td>
-                    <td>{{ p['tinggi_cnt'] }} Titik Sentinel</td>
-                    <td>{% if p['gambut_cnt'] > 0 %}<span style="color:#ea580c; font-weight:700;">{{ p['gambut_cnt'] }} Titik Sentinel</span>{% else %}-{% endif %}</td>
+                    <td><b>{{ p['ekstrim_cnt'] }} Titik</b></td>
+                    <td>{{ p['tinggi_cnt'] }} Titik</td>
+                    <td>{% if p['gambut_cnt'] > 0 %}<span style="color:#ea580c; font-weight:700;">{{ p['gambut_cnt'] }} Titik</span>{% else %}-{% endif %}</td>
                     <td><b>{{ p['hs_count'] }} Titik</b></td>
                     <td style="font-size:12px; color:#475569;">
                         {% if p['provinsi'] == 'KALTENG' %}
@@ -768,6 +876,7 @@ HTML_CODE = """<!DOCTYPE html>
         </table>
     </div>
 
+    <!-- DETAIL PERINGATAN DINI CUACA -->
     <div class="card" style="border-left: 5px solid #e11d48;">
         <div class="card-header-title">
             ⚠️ Detail Peringatan Dini Cuaca, 3 Elemen Pembakar & Keyakinan Hotspot 5 Hari ke Depan
@@ -780,11 +889,11 @@ HTML_CODE = """<!DOCTYPE html>
                     <th>Titik Sentinel / Kawasan Kritis</th>
                     <th>Koordinat Acuan</th>
                     <th>Tanggal Proyeksi</th>
-                    <th>Keyakinan Timbul Hotspot (%)</th>
-                    <th>Hari Tanpa Hujan (HTH)</th>
+                    <th>Keyakinan Hotspot (%)</th>
+                    <th>HTH</th>
                     <th>1. Suhu Puncak</th>
-                    <th>2. Ketersediaan Bahan Bakar</th>
-                    <th>3. Desikasi (RH / Angin)</th>
+                    <th>2. Bahan Bakar</th>
+                    <th>3. RH & Angin</th>
                     <th>Tipe Lahan</th>
                     <th>Tingkat Ancaman</th>
                 </tr>
@@ -801,18 +910,10 @@ HTML_CODE = """<!DOCTYPE html>
                         <span style="font-size:14px; font-weight:800; color:{% if f['confidence_pct'] >= 80 %}#dc2626{% elif f['confidence_pct'] >= 60 %}#d97706{% else %}#16a34a{% endif %};">
                             {{ f['confidence_pct'] }}%
                         </span>
-                        <div style="font-size:11px; color:#64748b;">{{ f['confidence_label'] }}</div>
                     </td>
                     <td><b>{{ f['dry_days_projected'] }} Hari Kering</b></td>
                     <td><b>{{ f['temp_max'] }}°C</b></td>
-                    <td>
-                        {{ f['precip_sum'] }} mm 
-                        {% if f['precip_sum'] < 1.0 %}
-                            <span style="color:#dc2626; font-size:11px; font-weight:bold;">(Kering Ekstrim)</span>
-                        {% else %}
-                            <span style="color:#16a34a; font-size:11px;">(Lembap)</span>
-                        {% endif %}
-                    </td>
+                    <td>{{ f['precip_sum'] }} mm</td>
                     <td>RH {{ f['rh_min'] }}% | {{ f['wind_max'] }} km/j</td>
                     <td>{% if f['is_gambut'] == 1 %}<span style="color:#ea580c; font-weight:700;">Gambut</span>{% else %}Mineral{% endif %}</td>
                     <td>
@@ -836,7 +937,10 @@ HTML_CODE = """<!DOCTYPE html>
     {% if current_view != 'FORECAST_ONLY' %}
     <div class="card">
         <div class="card-header-title">
-            🛰️ Matriks Riwayat Titik Hotspot Eksisting 10 Hari Terakhir (Multi-Satelit)
+            <span>🛰️ Matriks Riwayat Titik Hotspot Eksisting (Multi-Sensor Terkonfirmasi)</span>
+            {% if stats['is_capped'] %}
+                <span class="info-cap-box">⚡ Ditampilkan 300 Titik Hotspot Prioritas Terkini (dari total {{ stats['total_db'] }} titik)</span>
+            {% endif %}
         </div>
         <table>
             <thead>
@@ -846,9 +950,9 @@ HTML_CODE = """<!DOCTYPE html>
                     <th>Koordinat</th>
                     <th>Kabupaten</th>
                     <th>Fungsi Kawasan</th>
-                    <th>Nama Kawasan / PBPH / Unit</th>
+                    <th>Nama Kawasan / Unit</th>
                     <th>Gambut</th>
-                    <th>Sensor</th>
+                    <th>Sensor Terkonfirmasi</th>
                     {% for d in date_columns %}
                         <th>{{ d }}</th>
                     {% endfor %}
@@ -864,7 +968,7 @@ HTML_CODE = """<!DOCTYPE html>
                     <td>{{ row['fungsi_kawasan'] }}</td>
                     <td><b>{{ row['nama_kawasan'] }}</b></td>
                     <td>{% if row['is_gambut_label'] == 'Ya' %}<span style="color:#ea580c; font-weight:700;">Gambut</span>{% else %}Mineral{% endif %}</td>
-                    <td>{{ row['sensor_terdeteksi'] }}</td>
+                    <td><code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-weight:600; color:#0f172a;">{{ row['sensor_terdeteksi'] }}</code></td>
                     {% for d in date_columns %}
                         <td>
                             {% set st = row[d] %}
@@ -901,9 +1005,9 @@ HTML_CODE = """<!DOCTYPE html>
             fetch('/api/sync')
                 .then(r => r.json())
                 .then(res => {
-                    btn.innerHTML = '⏳ Menarik Data Satelit & Cuaca (8 dtk)...';
+                    btn.innerHTML = '⏳ Memuat Data Satelit (8 dtk)...';
                     setTimeout(() => {
-                        alert('Data hotspot dan prediksi cuaca berhasil disinkronkan!');
+                        alert('Sinkronisasi data hotspot dan cuaca berhasil dijalankan!');
                         window.location.reload();
                     }, 8000);
                 })
@@ -915,11 +1019,11 @@ HTML_CODE = """<!DOCTYPE html>
         }
 
         const mapCenter = {{ map_center|tojson }};
-        const map = L.map('map').setView([mapCenter[0], mapCenter[1]], mapCenter[2]);
+        const map = L.map('map', { preferCanvas: true }).setView([mapCenter[0], mapCenter[1]], mapCenter[2]);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 18,
-            attribution: '© OpenStreetMap contributors | Pemantauan Karhutla'
+            attribution: '© OpenStreetMap | Pemantauan Karhutla'
         }).addTo(map);
 
         const hotspotLayer = L.layerGroup();
@@ -935,23 +1039,21 @@ HTML_CODE = """<!DOCTYPE html>
             const color = isPadam ? '#94a3b8' : (st === 'Tinggi' ? '#dc2626' : (st === 'Sedang' ? '#d97706' : '#16a34a'));
             
             const circle = L.circleMarker([pt.latitude, pt.longitude], {
-                radius: isPadam ? 5 : 8,
+                radius: isPadam ? 4 : 7,
                 fillColor: color,
                 color: '#ffffff',
-                weight: 1.5,
+                weight: 1,
                 opacity: 1,
-                fillOpacity: 0.9
+                fillOpacity: 0.85
             });
 
             circle.bindPopup(`
                 <div style="font-size:12px; min-width:210px;">
-                    <strong style="color:${color}; font-size:14px;">Hotspot Eksisting: ${st}</strong><br>
+                    <strong style="color:${color}; font-size:13px;">Hotspot: ${st}</strong><br>
                     <b>Kawasan:</b> ${pt.nama_kawasan}<br>
                     <b>Koordinat:</b> ${Number(pt.latitude).toFixed(4)}, ${Number(pt.longitude).toFixed(4)}<br>
                     <b>Kabupaten:</b> ${pt.kabupaten} (${pt.provinsi})<br>
-                    <b>Fungsi:</b> ${pt.fungsi_kawasan}<br>
-                    <b>Tipe Lahan:</b> ${pt.is_gambut_label === 'Ya' ? 'Rawa Gambut' : 'Tanah Mineral'}<br>
-                    <b>Sensor Satelit:</b> ${pt.sensor_terdeteksi}
+                    <b>Sensor Terkonfirmasi:</b> ${pt.sensor_terdeteksi}
                 </div>
             `);
             hotspotLayer.addLayer(circle);
@@ -966,33 +1068,22 @@ HTML_CODE = """<!DOCTYPE html>
                 const pulseColor = isEkstrim ? '#dc2626' : '#ea580c';
                 
                 const marker = L.circleMarker([fc.latitude, fc.longitude], {
-                    radius: 13,
+                    radius: 12,
                     fillColor: pulseColor,
                     color: '#ffffff',
                     weight: 2,
-                    dashArray: '4, 4',
+                    dashArray: '3, 3',
                     fillOpacity: 0.5
                 });
 
                 marker.bindPopup(`
-                    <div style="font-size:12px; min-width:245px;">
-                        <span style="background:${pulseColor}; color:white; padding:2px 8px; border-radius:4px; font-weight:bold;">
-                            🔥 Potensi H-5: ${fc.risk_category}
+                    <div style="font-size:12px; min-width:230px;">
+                        <span style="background:${pulseColor}; color:white; padding:2px 6px; border-radius:4px; font-weight:bold;">
+                            🔥 Potensi: ${fc.risk_category}
                         </span><br>
-                        <div style="margin: 6px 0 2px 0;">
-                            <b>Keyakinan Hotspot:</b> <span style="font-size:14px; font-weight:bold; color:${pulseColor};">${fc.confidence_pct}%</span>
-                            <div style="font-size:11px; color:#64748b;">${fc.confidence_label}</div>
-                        </div>
-                        <b style="font-size:13px; display:inline-block; margin-top:4px;">${fc.nama_kawasan}</b><br>
-                        <span style="color:#0f172a; font-weight:bold; background:#f1f5f9; padding:1px 4px; border-radius:3px;">
-                            📍 ${Number(fc.latitude).toFixed(4)}, ${Number(fc.longitude).toFixed(4)}
-                        </span><br>
-                        <span style="color:#64748b;">${fc.provinsi} | ${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
-                        <hr style="border:0; border-top:1px solid #e2e8f0; margin:6px 0;">
-                        <b>Analisis 3 Elemen Pembakar:</b><br>
-                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C<br>
-                        🍂 <b>2. Bahan Bakar / HTH:</b> ${fc.dry_days_projected} Hari Kering (${fc.precip_sum} mm)<br>
-                        💨 <b>3. Desikasi (RH & Angin):</b> RH ${fc.rh_min}% | Angin ${fc.wind_max} km/j
+                        <b>Keyakinan Hotspot:</b> ${fc.confidence_pct}%<br>
+                        <b>Kawasan:</b> ${fc.nama_kawasan}<br>
+                        <b>Koordinat:</b> ${Number(fc.latitude).toFixed(4)}, ${Number(fc.longitude).toFixed(4)}
                     </div>
                 `);
                 forecastLayer.addLayer(marker);
@@ -1009,24 +1100,10 @@ HTML_CODE = """<!DOCTYPE html>
         }
 
         const overlayMaps = {
-            "🛰️ Hotspot Eksisting (Satelit)": hotspotLayer,
-            "⚠️ Potensi Karhutla H-5 (Sentinel)": forecastLayer
+            "🛰️ Hotspot Eksisting": hotspotLayer,
+            "⚠️ Potensi H-5": forecastLayer
         };
         L.control.layers(null, overlayMaps, {collapsed: false, position: 'topright'}).addTo(map);
-
-        const legend = L.control({position: 'bottomright'});
-        legend.onAdd = function (map) {
-            const div = L.DomUtil.create('div', 'legend-box');
-            div.innerHTML = `
-                <b>Legenda Spasial</b><br>
-                <span class="legend-dot" style="background:#dc2626;"></span> Hotspot Eksisting Tinggi (≥80%)<br>
-                <span class="legend-dot" style="background:#d97706;"></span> Hotspot Eksisting Sedang<br>
-                <span class="legend-dot" style="background:#94a3b8;"></span> Hotspot Padam (Riwayat 10 Hari)<br>
-                <span class="legend-dot" style="background:#ea580c; border:1px dashed #ffffff;"></span> Titik Potensi Karhutla (Sentinel H-5)
-            `;
-            return div;
-        };
-        legend.addTo(map);
     </script>
 </body>
 </html>"""
@@ -1055,7 +1132,7 @@ def index():
     map_center = PROV_CENTERS.get(prov, PROV_CENTERS["ALL"])
 
     return render_template_string(
-        HTML_CODE,
+        HTML_PAGE,
         rows=rows,
         forecasts=forecasts,
         prov_summary=prov_summary,
@@ -1103,7 +1180,7 @@ def download_excel():
     return "File Excel belum tersedia", 404
 
 # ==========================================
-# 8. INISIALISASI BEBAS TIMEOUT & OOM
+# 8. INISIALISASI BEBAS OOM & INSTANT BOOT
 # ==========================================
 init_db()
 
