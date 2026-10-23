@@ -16,6 +16,7 @@ import requests
 DB_NAME = "hotspot_multi.db"
 DEFAULT_NASA_KEY = "cf5d1449942e6c851eba10358106ea6f"
 
+# Batas Geografis (min_lon, min_lat, max_lon, max_lat)
 PROV_BOUNDS = {
     "JAMBI": (101.15, -2.50, 104.55, -0.75),
     "SUMSEL": (102.05, -4.95, 106.15, -1.65),
@@ -184,15 +185,15 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & CUACA H-5
+# 3. PENARIKAN DATA SATELLITE RIIL (KUNCI ASLI RIBUAN TITIK)
 # ==========================================
-def parse_firms_csv(csv_text, sat_lbl, default_date, combined, target_prov):
-    lines = csv_text.strip().split("\n")
+def parse_and_append_hotspots(csv_content, sat_lbl, default_date, target_prov, combined):
+    lines = csv_content.strip().split("\n")
     if len(lines) <= 1 or "latitude" not in lines[0]:
         return 0
 
-    count = 0
-    df = pd.read_csv(io.StringIO(csv_text))
+    df = pd.read_csv(io.StringIO(csv_content))
+    added = 0
     for _, r in df.iterrows():
         try:
             lat = float(r["latitude"])
@@ -230,46 +231,45 @@ def parse_firms_csv(csv_text, sat_lbl, default_date, combined, target_prov):
                 "satellite_source": sat_lbl,
                 "acq_date": acq_date,
             })
-            count += 1
-    return count
+            added += 1
+    return added
 
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     combined = []
 
-    # Jalur Utama: API NASA FIRMS Resmi (Key-Based)
-    sensors = [
+    # Jalur 1: Endpoint Country Resmi NASA FIRMS API
+    api_sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("VIIRS_NOAA20_NRT", "NOAA-20"),
         ("MODIS_NRT", "Terra/Aqua"),
     ]
-
-    for api_code, sat_lbl in sensors:
+    for api_code, sat_lbl in api_sensors:
         url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
         try:
-            resp = requests.get(url, timeout=15)
+            resp = requests.get(url, timeout=12)
             if resp.status_code == 200:
-                parse_firms_csv(resp.text, sat_lbl, target_date_str, combined, target_prov)
+                parse_and_append_hotspots(resp.text, sat_lbl, target_date_str, target_prov, combined)
         except Exception as e:
-            print(f"Error jalur utama {sat_lbl}: {e}")
+            print(f"Jalur API {sat_lbl} gagal: {e}")
 
-    # Jalur Cadangan (Bypass jika Kunci API Limit/Error): Direct Open Feed NASA FIRMS NRT
+    # Jalur 2: Feed NRT Bebas Kuota (Menjamin ribuan titik selalu masuk jika Jalur 1 mencapai kuota)
     if len(combined) == 0:
-        print("--> Mengaktifkan jalur ekstraksi cadangan NASA FIRMS NRT...")
-        backup_sources = [
+        print("--> Mengaktifkan Feed Arsip NASA FIRMS NRT 24-48 Jam...")
+        open_feeds = [
             ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/suomi-npp-viirs-c2/csv/SUOMI_VIIRS_C2_SouthEast_Asia_24h.csv", "SNPP"),
             ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_SouthEast_Asia_24h.csv", "NOAA-20"),
             ("https://firms.modaps.eosdis.nasa.gov/data/active_fire/modis-c6.1/csv/MODIS_C6_1_SouthEast_Asia_24h.csv", "Terra/Aqua")
         ]
-        for b_url, b_lbl in backup_sources:
+        for f_url, f_lbl in open_feeds:
             try:
-                b_resp = requests.get(b_url, timeout=18)
-                if b_resp.status_code == 200:
-                    parse_firms_csv(b_resp.text, b_lbl, target_date_str, combined, target_prov)
+                f_resp = requests.get(f_url, timeout=15)
+                if f_resp.status_code == 200:
+                    parse_and_append_hotspots(f_resp.text, f_lbl, target_date_str, target_prov, combined)
             except Exception as e:
-                print(f"Error jalur cadangan {b_lbl}: {e}")
+                print(f"Jalur Open Feed {f_lbl} gagal: {e}")
 
-    print(f"--> [TOTAL DATA SATELIT MASUK]: {len(combined)} titik.")
+    print(f"--> [TOTAL DATA SATELIT MASUK]: {len(combined)} titik koordinat.")
     return combined
 
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
@@ -389,7 +389,7 @@ def sync_hotspots_multi(target_date_str):
     conn = sqlite3.connect(DB_NAME, timeout=30)
     c = conn.cursor()
 
-    # Hapus seluruh data bawaan 10 titik statis begitu data satelit riil terambil
+    # Bersihkan data dummy 10 titik seketika data satelit riil masuk
     c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
     c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
 
@@ -402,7 +402,6 @@ def sync_hotspots_multi(target_date_str):
         dt = pt["acq_date"]
 
         status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
-        # Grid resolusi ~1.1 km agar sensor yang mendeteksi titik yang sama otomatis terkonsolidasi
         cid = f"HS-{prov}-{round(lat, 2)}-{round(lon, 2)}"
         fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
@@ -423,7 +422,7 @@ def sync_hotspots_multi(target_date_str):
     return len(raw_points)
 
 # ==========================================
-# 4. INITIAL SEED (HANYA AKTIF SAAT PERTAMA KALI KOSONG)
+# 4. INITIAL SEED
 # ==========================================
 def seed_historical_multi():
     init_db()
@@ -685,7 +684,7 @@ def generate_table_multi(
 
     merged.insert(0, "No", range(1, len(merged) + 1))
     
-    # Ambil maksimal 300 titik teratas untuk visualisasi peta
+    # Ambil maksimal 300 titik teratas khusus untuk visualisasi peta
     map_df = merged.head(300)
     summary_stats["map_total"] = len(map_df)
 
@@ -728,7 +727,7 @@ def run_scheduler():
         time.sleep(25)
 
 # ==========================================
-# 7. FLASK APP & TAMPILAN
+# 7. FLASK APP & TAMPILAN JINJA2
 # ==========================================
 app = Flask(__name__)
 
@@ -1028,7 +1027,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
         function refreshData() {
             const btn = document.querySelector('.btn-refresh');
-            btn.innerHTML = '⏳ Menarik Langsung Data Satelit NASA (Tunggu 10-15 dtk)...';
+            btn.innerHTML = '⏳ Menarik Data Satelit NASA FIRMS (Sedang Berjalan)...';
             btn.disabled = true;
 
             fetch('/api/sync')
