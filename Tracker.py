@@ -185,13 +185,14 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & CUACA H-5
+# 3. PENARIKAN NASA FIRMS (PERBAIKAN PARAMETER RESMI)
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
     prov_keys = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"] if target_prov == "ALL" else [target_prov]
     combined = []
 
+    # Sensor resmi Near Real-Time NASA FIRMS
     sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
         ("NOAA_20_VIIRS_NRT", "NOAA-20"),
@@ -199,168 +200,77 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
         ("MODIS_NRT", "Terra/Aqua"),
     ]
 
+    # Ambil tanggal kemarin jika jam UTC satelit belum update hari ini
+    today_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    date_candidates = [
+        target_date_str,
+        (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    ]
+
     for p in prov_keys:
         bbox = PROVINSI_BBOX[p]
         for api_code, sat_lbl in sensors:
-            url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/2/{target_date_str}"
-            try:
-                resp = requests.get(url, timeout=12)
-                if resp.status_code == 200 and "latitude" in resp.text:
-                    df = pd.read_csv(io.StringIO(resp.text))
-                    if df.empty or "latitude" not in df.columns:
-                        continue
+            success = False
+            for d_str in date_candidates:
+                # Format resmi NASA FIRMS: area/csv/[KEY]/[SOURCE]/[BBOX]/[DAYS]/[YYYY-MM-DD]
+                url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/1/{d_str}"
+                try:
+                    resp = requests.get(url, timeout=10)
+                    if resp.status_code == 200 and "latitude" in resp.text:
+                        lines = resp.text.strip().split("\n")
+                        # Pastikan ada baris data selain header
+                        if len(lines) > 1 and "latitude" in lines[0]:
+                            df = pd.read_csv(io.StringIO(resp.text))
+                            for _, r in df.iterrows():
+                                lat = float(r["latitude"])
+                                lon = float(r["longitude"])
 
-                    for _, r in df.iterrows():
-                        lat = float(r["latitude"])
-                        lon = float(r["longitude"])
+                                c_raw = str(r.get("confidence", "nominal")).strip().lower()
+                                if c_raw in ["h", "high"]:
+                                    conf_val = 90.0
+                                elif c_raw in ["l", "low"]:
+                                    conf_val = 25.0
+                                else:
+                                    try:
+                                        conf_val = float(c_raw)
+                                    except ValueError:
+                                        conf_val = 60.0
 
-                        c_raw = str(r.get("confidence", "nominal")).strip().lower()
-                        if c_raw in ["h", "high"]:
-                            conf_val = 90.0
-                        elif c_raw in ["l", "low"]:
-                            conf_val = 25.0
-                        else:
-                            try:
-                                conf_val = float(c_raw)
-                            except ValueError:
-                                conf_val = 60.0
+                                acq_date = str(r.get("acq_date", d_str))
 
-                        acq_date = str(r.get("acq_date", target_date_str))
+                                combined.append({
+                                    "provinsi": p,
+                                    "latitude": lat,
+                                    "longitude": lon,
+                                    "confidence": conf_val,
+                                    "satellite_source": sat_lbl,
+                                    "acq_date": acq_date,
+                                })
+                            success = True
+                            break
+                except Exception as e:
+                    print(f"Error unduh {sat_lbl} {p}: {e}")
 
-                        combined.append({
-                            "provinsi": p,
-                            "latitude": lat,
-                            "longitude": lon,
-                            "confidence": conf_val,
-                            "satellite_source": sat_lbl,
-                            "acq_date": acq_date,
-                        })
-            except Exception:
-                pass
-
+    print(f"--> Total titik berhasil ditarik dari NASA FIRMS: {len(combined)} titik.")
     return combined
 
-def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
-    temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
-    rh_score = min(max((75.0 - rm) * 1.2, 0), 30)
-    dry_score = 25 if pr < 1.0 else (10 if pr < 5.0 else 0)
-    peat_multiplier = 1.25 if item["gambut"] == 1 else 1.05
-
-    raw_score = (temp_score + rh_score + dry_score) * peat_multiplier * (1.0 + (wn / 60.0))
-    score = min(round(raw_score, 1), 100.0)
-
-    conf_raw = 100.0 / (1.0 + math.exp(-0.11 * (score - 60.0)))
-    conf_pct = min(max(round(conf_raw, 1), 5.0), 98.0)
-
-    if conf_pct >= 85:
-        conf_label = "Sangat Tinggi (High Confidence)"
-    elif conf_pct >= 65:
-        conf_label = "Tinggi (Medium-High)"
-    elif conf_pct >= 40:
-        conf_label = "Sedang (Moderate)"
-    else:
-        conf_label = "Rendah (Low)"
-
-    if score >= 80:
-        cat = "Ekstrim"
-    elif score >= 60:
-        cat = "Tinggi"
-    elif score >= 35:
-        cat = "Sedang"
-    else:
-        cat = "Rendah"
-
-    fid = f"FC-{item['prov']}-{fc_date}-{int(item['lat']*100)}-{int(item['lon']*100)}"
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT OR REPLACE INTO fire_risk_forecast
-        (forecast_id, provinsi, nama_kawasan, latitude, longitude, forecast_date, temp_max, rh_min, precip_sum, wind_max, is_gambut, risk_score, risk_category, confidence_pct, confidence_label, dry_days_projected)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """,
-        (
-            fid,
-            item["prov"],
-            item["kawasan"],
-            item["lat"],
-            item["lon"],
-            fc_date,
-            tm,
-            rm,
-            pr,
-            wn,
-            item["gambut"],
-            score,
-            cat,
-            conf_pct,
-            conf_label,
-            dry_count,
-        ),
-    )
-
-def update_fire_risk_forecast_multi():
-    conn = sqlite3.connect(DB_NAME)
-    today = date.today()
-
-    for item in SENTINEL_POINTS:
-        lat, lon = item["lat"], item["lon"]
-        url = (
-            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-            "&daily=temperature_2m_max,relative_humidity_2m_min,precipitation_sum,wind_speed_10m_max"
-            "&timezone=Asia%2FJakarta&forecast_days=5"
-        )
-        fetched_successfully = False
-        try:
-            r = requests.get(url, timeout=5)
-            if r.status_code == 200:
-                data = r.json().get("daily", {})
-                times = data.get("time", [])
-                t_max = data.get("temperature_2m_max", [])
-                rh_min = data.get("relative_humidity_2m_min", [])
-                precip = data.get("precipitation_sum", [])
-                wind = data.get("wind_speed_10m_max", [])
-
-                dry_count = 0
-                for i in range(len(times)):
-                    fc_date = times[i]
-                    tm = t_max[i] if i < len(t_max) else 33.0
-                    rm = rh_min[i] if i < len(rh_min) else 50.0
-                    pr = precip[i] if i < len(precip) else 0.0
-                    wn = wind[i] if i < len(wind) else 12.0
-                    dry_count = dry_count + 1 if pr < 1.0 else 0
-                    calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count)
-
-                fetched_successfully = True
-        except Exception:
-            fetched_successfully = False
-
-        if not fetched_successfully:
-            for day_offset in range(5):
-                fc_date = (today + timedelta(days=day_offset)).strftime("%Y-%m-%d")
-                tm = 35.5 if item["gambut"] == 1 else 33.5
-                rm = 42.0 if item["gambut"] == 1 else 55.0
-                pr = 0.0 if day_offset < 3 else 2.5
-                wn = 14.0
-                dry_count = day_offset + 1 if pr < 1.0 else 0
-                calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count)
-
-    conn.commit()
-    conn.close()
 
 def sync_hotspots_multi(target_date_str):
     init_db()
     raw_points = fetch_satellite_data_multi(target_date_str, target_prov="ALL")
 
     if not raw_points:
+        print("Data satelit belum terambil dari NASA FIRMS.")
         return
 
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
+    # Hapus data seed statis karena data asli satelit sudah didapatkan
     c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-S%'")
     c.execute("DELETE FROM hotspot_daily_log WHERE cluster_id LIKE 'HS-%-S%'")
 
-    for pt in raw_points:
+    for idx, pt in enumerate(raw_points):
         prov = pt["provinsi"]
         lat = pt["latitude"]
         lon = pt["longitude"]
@@ -369,6 +279,7 @@ def sync_hotspots_multi(target_date_str):
         dt = pt["acq_date"]
 
         status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+        # Buat cluster_id unik per koordinat dan tanggal
         cid = f"HS-{prov}-{dt}-{int(abs(lat)*1000)}-{int(abs(lon)*1000)}"
         fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
@@ -386,6 +297,7 @@ def sync_hotspots_multi(target_date_str):
 
     conn.commit()
     conn.close()
+    print(f"--> Berhasil menyimpan {len(raw_points)} titik ke database SQLite.")
 
 # ==========================================
 # 4. INITIAL SEED (BASELINE 10 HARI)
