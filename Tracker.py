@@ -470,70 +470,67 @@ def update_fire_risk_forecast_multi():
     conn.commit()
     conn.close()
 
+# ==========================================
+# PERBAIKAN: PENARIKAN CEPAT TANPA BOTTLENECK GEOPANDAS
+# ==========================================
 def sync_hotspots_multi(target_date_str):
     init_db()
-
+    
+    # 1. Ambil data satelit NRT langsung dari NASA FIRMS
     raw_points = fetch_satellite_data_multi(target_date_str, target_prov="ALL")
-
-    if not raw_points:
-        yesterday_str = (datetime.strptime(target_date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-        raw_points = fetch_satellite_data_multi(yesterday_str, target_prov="ALL")
-        if raw_points:
-            target_date_str = yesterday_str
-
+    
     if not raw_points:
         return
 
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
+    
+    # Kosongkan klaster dummy jika data riil satelit berhasil ditarik
+    c.execute("DELETE FROM hotspot_clusters WHERE cluster_id LIKE 'HS-%-01' OR cluster_id LIKE 'HS-%-02'")
 
-    df_raw = pd.DataFrame(raw_points)
+    # 2. Masukkan titik mentah satelit secara langsung dan cepat
+    for idx, pt in enumerate(raw_points):
+        prov = pt["provinsi"]
+        lat = pt["latitude"]
+        lon = pt["longitude"]
+        conf = pt["confidence"]
+        sat = pt["satellite_source"]
+        dt = pt["acq_date"]
+        
+        status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+        cid = f"HS-{prov}-{int(datetime.now().timestamp())}-{idx}"
+        
+        # Klasifikasi kawasan cepat berbasis koordinat gambut Kalteng
+        is_gambut = 1 if (prov == "KALTENG" and lat <= -1.80) else (1 if prov in ["JAMBI", "SUMSEL"] and lon >= 103.5 else 0)
+        kawasan_label = "Lahan Gambut Kalteng" if is_gambut == 1 else "Lahan Terbuka / Mineral"
 
-    def set_status(conf):
-        return "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
+        # Simpan ke tabel master klaster
+        c.execute("""
+            INSERT OR REPLACE INTO hotspot_clusters 
+            (cluster_id, provinsi, latitude, longitude, kabupaten, fungsi_kawasan, nama_kawasan, is_gambut, first_detected, last_detected, consecutive_padam_days, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
+        """, (cid, prov, lat, lon, "Wilayah Rawan", "Lanskap Terbuka", kawasan_label, is_gambut, dt, dt))
 
-    df_raw["status"] = df_raw["confidence"].apply(set_status)
-    df_raw["date"] = df_raw["acq_date"]
-
-    gdf = overlay_kawasan_multi(df_raw)
-    gdf["cluster_id"] = match_or_create_clusters_multi(conn, gdf, threshold_km=0.5)
-
-    for _, row in gdf.iterrows():
-        c.execute(
-            """
-            INSERT OR REPLACE INTO hotspot_daily_log (cluster_id, log_date, satellite_source, status, confidence)
+        # Simpan ke log harian
+        c.execute("""
+            INSERT OR REPLACE INTO hotspot_daily_log 
+            (cluster_id, log_date, satellite_source, status, confidence)
             VALUES (?, ?, ?, ?, ?)
-        """,
-            (row.cluster_id, row.date, row.satellite_source, row.status, row.confidence),
-        )
-
-    c.execute("SELECT cluster_id, consecutive_padam_days FROM hotspot_clusters WHERE is_active = 1")
-    all_active = c.fetchall()
-    active_today = set(gdf["cluster_id"])
-
-    for cid, padam_days in all_active:
-        if cid not in active_today:
-            new_p = padam_days + 1
-            if new_p >= 10:
-                c.execute(
-                    "UPDATE hotspot_clusters SET consecutive_padam_days = ?, is_active = 0 WHERE cluster_id = ?",
-                    (new_p, cid),
-                )
-            else:
-                c.execute(
-                    "UPDATE hotspot_clusters SET consecutive_padam_days = ? WHERE cluster_id = ?",
-                    (new_p, cid),
-                )
+        """, (cid, dt, sat, status, conf))
 
     conn.commit()
     conn.close()
+
+
+
 
 # ==========================================
 # 5. DATA AWAL HISTORIS DENGAN TANGGAL BERJALAN
 # ==========================================
 def seed_historical_multi():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    """Hapus data dummy dan langsung picu sinkronisasi data riil NASA."""
+    today_str = date.today().strftime("%Y-%m-%d")
+    sync_hotspots_multi(today_str)
 
     c.execute("SELECT COUNT(*) FROM hotspot_clusters WHERE provinsi = 'KALTENG'")
     has_kalteng = c.fetchone()[0]
