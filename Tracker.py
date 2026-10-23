@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 from datetime import date, datetime, timedelta
-from flask import Flask, jsonify, render_template_string, request, send_file
+from flask import Flask, jsonify, render_template, request, send_file
 import pandas as pd
 import requests
 
@@ -132,7 +132,7 @@ def get_nasa_key():
     return row[0] if row else DEFAULT_NASA_KEY
 
 # ==========================================
-# 2. OVERLAY KAWASAN RINGAN (RAM < 5MB)
+# 2. OVERLAY KAWASAN CEPAT
 # ==========================================
 def classify_point_fast(prov, lat, lon):
     if prov == "JAMBI":
@@ -185,7 +185,7 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & OPEN-METEO
+# 3. PENARIKAN NASA FIRMS & CUACA H-5
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
@@ -203,7 +203,7 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
         for api_code, sat_lbl in sensors:
             url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/2"
             try:
-                resp = requests.get(url, timeout=8)
+                resp = requests.get(url, timeout=10)
                 if resp.status_code == 200 and "latitude" in resp.text:
                     df = pd.read_csv(io.StringIO(resp.text))
                     if df.empty or "latitude" not in df.columns:
@@ -672,433 +672,94 @@ def run_scheduler():
         time.sleep(25)
 
 # ==========================================
-# 7. FLASK APP & HTML TEMPLATE
+# 7. FLASK APP
 # ==========================================
 app = Flask(__name__)
 
-HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <title>Sistem Pemantauan Hotspot & Peringatan Dini Karhutla Multi-Provinsi</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px; background: #f8fafc; color: #1e293b; }
-        .header { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 20px 28px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }
-        h1 { margin: 0; font-size: 22px; color: #0f172a; }
-        .subtitle { font-size: 13px; color: #64748b; margin-top: 4px; }
-        .schedule-badge { background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 6px; font-weight: 700; }
-        
-        .controls { display: flex; gap: 12px; align-items: center; background: white; padding: 14px 24px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; flex-wrap: wrap; }
-        select { padding: 9px 12px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 13px; font-weight: 600; background: white; color: #0f172a; }
-        .select-prov { background: #f0fdf4; border-color: #86efac; color: #166534; font-size: 14px; }
-        .select-mode { background: #eff6ff; border-color: #93c5fd; color: #1e40af; font-size: 14px; font-weight: 700; }
-        
-        button, a.btn { padding: 9px 16px; border-radius: 8px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
-        .btn-refresh { background: #0284c7; color: white; }
-        .btn-excel { background: #16a34a; color: white; }
-        
-        .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow-x: auto; margin-bottom: 24px; }
-        .card-header-title { font-size: 16px; font-weight: 700; color: #0f172a; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
-        
-        #map { height: 500px; width: 100%; border-radius: 10px; border: 1px solid #e2e8f0; }
-        
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }
-        th { background: #f8fafc; color: #475569; font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
-        
-        .badge { padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 11px; display: inline-block; text-align: center; }
-        .badge-tinggi, .badge-ekstrim { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
-        .badge-sedang { background: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
-        .badge-rendah { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
-        .badge-padam { background: #f1f5f9; color: #94a3b8; border: 1px solid #e2e8f0; }
-        
-        .prov-tag { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
-        .prov-jambi { background: #e0f2fe; color: #0284c7; }
-        .prov-sumsel { background: #fef3c7; color: #d97706; }
-        .prov-jatim { background: #dcfce7; color: #15803d; }
-        .prov-kalteng { background: #ffedd5; color: #ea580c; }
-        .prov-kaltim { background: #f3e8ff; color: #7e22ce; }
-        
-        .summary-container { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 24px; }
-        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
-        .stat-card { padding: 16px; border-radius: 10px; border: 1px solid #e2e8f0; background: #fafafa; display: flex; flex-direction: column; justify-content: space-between; }
-        .stat-val { font-size: 26px; font-weight: 800; margin-top: 4px; }
-        .stat-lbl { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #64748b; }
-        .stat-ekstrim { background: #fff1f2; border-color: #fda4af; }
-        .stat-ekstrim .stat-val { color: #e11d48; }
+@app.route("/")
+def index():
+    prov = request.args.get("prov", "ALL")
+    view = request.args.get("view", "ALL_LAYERS")
+    source = request.args.get("source", "ALL_DATA")
+    sat = request.args.get("sat", "ALL")
+    status = request.args.get("status", "ALL")
 
-        .legend-box { background: white; padding: 10px 14px; border-radius: 8px; box-shadow: 0 1px 5px rgba(0,0,0,0.2); font-size: 12px; line-height: 20px; }
-        .legend-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-    </style>
-</head>
-<body>
+    ref_d, session_name = get_effective_date_and_session()
+    ref_str = ref_d.strftime("%Y-%m-%d")
 
-    <div class="header">
-        <div>
-            <h1>Sistem Pemantauan Hotspot & Peringatan Dini Karhutla</h1>
-            <div class="subtitle">
-                Cakupan: <strong>Jambi, Sumatera Selatan, Jawa Timur, Kalimantan Tengah, Kalimantan Timur</strong> | 
-                Sinkronisasi: <span class="schedule-badge">07:00 & 18:00 WIB</span> | 
-                Sesi: <strong>{{ session_name }} ({{ ref_date }})</strong>
-            </div>
-        </div>
-        <div>
-            <a href="/download-excel?prov={{ current_prov }}&sat={{ current_sat }}&source={{ current_source }}" class="btn btn-excel">📥 Unduh Excel ({{ current_prov }})</a>
-        </div>
-    </div>
+    df, date_list, stats = generate_table_multi(
+        ref_d,
+        filter_prov=prov,
+        filter_sat=sat,
+        filter_status=status,
+        filter_source=source,
+    )
+    rows = df.to_dict(orient="records") if not df.empty else []
+    forecasts = get_forecast_summary_multi(filter_prov=prov)
+    prov_summary = get_provincial_potential_summary()
+    map_center = PROV_CENTERS.get(prov, PROV_CENTERS["ALL"])
 
-    <div class="controls">
-        <label><strong>Pilih Wilayah:</strong></label>
-        <select id="provSelect" class="select-prov" onchange="applyFilters()">
-            <option value="ALL" {% if current_prov == 'ALL' %}selected{% endif %}>🇮🇩 Seluruh 5 Wilayah Provinsi</option>
-            <option value="JAMBI" {% if current_prov == 'JAMBI' %}selected{% endif %}>📍 Provinsi Jambi</option>
-            <option value="SUMSEL" {% if current_prov == 'SUMSEL' %}selected{% endif %}>📍 Provinsi Sumatera Selatan</option>
-            <option value="JATIM" {% if current_prov == 'JATIM' %}selected{% endif %}>📍 Provinsi Jawa Timur</option>
-            <option value="KALTENG" {% if current_prov == 'KALTENG' %}selected{% endif %}>📍 Provinsi Kalimantan Tengah</option>
-            <option value="KALTIM" {% if current_prov == 'KALTIM' %}selected{% endif %}>📍 Provinsi Kalimantan Timur</option>
-        </select>
+    return render_template(
+        "index.html",
+        rows=rows,
+        forecasts=forecasts,
+        prov_summary=prov_summary,
+        map_center=map_center,
+        date_columns=date_list,
+        ref_date=ref_str,
+        session_name=session_name,
+        current_prov=prov,
+        current_view=view,
+        current_source=source,
+        current_sat=sat,
+        stats=stats,
+    )
 
-        <label><strong>Fokus Tampilan:</strong></label>
-        <select id="viewModeSelect" class="select-mode" onchange="applyFilters()">
-            <option value="ALL_LAYERS" {% if current_view == 'ALL_LAYERS' %}selected{% endif %}>🔥 Tampilkan Keduanya (Hotspot & Potensi H-5)</option>
-            <option value="HOTSPOT_ONLY" {% if current_view == 'HOTSPOT_ONLY' %}selected{% endif %}>🛰️ Hanya Hotspot Eksisting (10 Hari)</option>
-            <option value="FORECAST_ONLY" {% if current_view == 'FORECAST_ONLY' %}selected{% endif %}>⚠️ Hanya Potensi Karhutla (Prediksi H-5)</option>
-        </select>
+@app.route("/api/sync")
+def api_sync():
+    ref_d, session_name = get_effective_date_and_session()
+    ref_str = ref_d.strftime("%Y-%m-%d")
 
-        <label><strong>Sumber Feed:</strong></label>
-        <select id="sourceSelect" onchange="applyFilters()">
-            <option value="ALL_DATA" {% if current_source == 'ALL_DATA' %}selected{% endif %}>🌐 Seluruh Lanskap (HK, HL, PBPH, APL)</option>
-            <option value="GITHUB_HK" {% if current_source == 'GITHUB_HK' %}selected{% endif %}>🌲 Khusus Kawasan Konservasi (TN/CA/SM/Tahura)</option>
-        </select>
+    def run_async():
+        try:
+            sync_hotspots_multi(ref_str)
+        except Exception:
+            pass
+        try:
+            update_fire_risk_forecast_multi()
+        except Exception:
+            pass
 
-        <button class="btn btn-refresh" onclick="refreshData()">🔄 Sinkronisasi Hotspot & Cuaca</button>
-    </div>
+    t_sync = threading.Thread(target=run_async, daemon=True)
+    t_sync.start()
 
-    <!-- KARTU STATISTIK UTAMA -->
-    <div class="summary-container">
-        <div class="summary-grid">
-            <div class="stat-card">
-                <span class="stat-lbl">Total Hotspot Aktif</span>
-                <span class="stat-val" style="color: #0284c7;">{{ stats['aktif'] }}</span>
-            </div>
-            <div class="stat-card" style="background:#fef2f2; border-color:#fecaca;">
-                <span class="stat-lbl">Hotspot Risiko Tinggi</span>
-                <span class="stat-val" style="color:#dc2626;">{{ stats['tinggi'] }}</span>
-            </div>
-            <div class="stat-card" style="background:#fffbeb; border-color:#fde68a;">
-                <span class="stat-lbl">Hotspot Sedang</span>
-                <span class="stat-val" style="color:#d97706;">{{ stats['sedang'] }}</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-lbl">Di Hutan Konservasi</span>
-                <span class="stat-val" style="color:#e11d48;">{{ stats['konservasi'] }}</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-lbl">Di Lahan Gambut</span>
-                <span class="stat-val" style="color:#ea580c;">{{ stats['gambut'] }}</span>
-            </div>
-            <div class="stat-card stat-ekstrim">
-                <span class="stat-lbl">Puncak Keyakinan H-5</span>
-                <span class="stat-val">{{ stats['max_conf'] }}%</span>
-            </div>
-        </div>
-    </div>
+    return jsonify({"status": "ok", "effective_date": ref_str, "session": session_name})
 
-    <!-- PETA SPASIAL LEAFLET.JS -->
-    <div class="card">
-        <div class="card-header-title">
-            <span>🗺️ Visualisasi Spasial Sebaran Hotspot Eksisting & Titik Potensi Karhutla H-5</span>
-            <span style="font-size:12px; color:#64748b; font-weight:normal;">Kontrol layer di pojok kanan atas peta untuk memilih tampilan</span>
-        </div>
-        <div id="map"></div>
-    </div>
+@app.route("/download-excel")
+def download_excel():
+    prov = request.args.get("prov", "ALL")
+    sat = request.args.get("sat", "ALL")
+    source = request.args.get("source", "ALL_DATA")
+    ref_d, _ = get_effective_date_and_session()
+    ref_str = ref_d.strftime("%Y-%m-%d")
+    out_file = export_to_excel_multi(ref_str, filter_prov=prov, filter_sat=sat, filter_source=source)
+    if os.path.exists(out_file):
+        return send_file(out_file, as_attachment=True, download_name=out_file)
+    return "File Excel belum tersedia", 404
 
-    <!-- REKAP POTENSI ANTAR PROVINSI -->
-    {% if current_view != 'HOTSPOT_ONLY' %}
-    <div class="card" style="border-top: 4px solid #0284c7;">
-        <div class="card-header-title">
-            📊 Rekapitulasi Matriks Status Potensi Karhutla Antar-Provinsi (Agregasi Data Prediksi H-5)
-        </div>
-        <table>
-            <thead>
-                <tr>
-                    <th>Provinsi</th>
-                    <th>Status Siaga Utama</th>
-                    <th>Keyakinan Hotspot Maksimum (Detail H-5)</th>
-                    <th>Titik Sentinel Ekstrim (H-5)</th>
-                    <th>Titik Sentinel Siaga Tinggi</th>
-                    <th>Titik Rawan Gambut</th>
-                    <th>Hotspot Eksisting</th>
-                    <th>Rekomendasi Operasional Lapangan</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for p in prov_summary %}
-                <tr>
-                    <td><span class="prov-tag prov-{{ p['provinsi']|lower }}">{{ p['provinsi'] }}</span></td>
-                    <td><span class="badge {{ p['badge_class'] }}">{{ p['status_label'] }}</span></td>
-                    <td><b style="color:#dc2626; font-size:14px;">{{ p['max_confidence'] }}%</b></td>
-                    <td><b>{{ p['ekstrim_cnt'] }} Titik Sentinel</b></td>
-                    <td>{{ p['tinggi_cnt'] }} Titik Sentinel</td>
-                    <td>{% if p['gambut_cnt'] > 0 %}<span style="color:#ea580c; font-weight:700;">{{ p['gambut_cnt'] }} Titik Sentinel</span>{% else %}-{% endif %}</td>
-                    <td><b>{{ p['hs_count'] }} Titik</b></td>
-                    <td style="font-size:12px; color:#475569;">
-                        {% if p['provinsi'] == 'KALTENG' %}
-                            Operasi TMC pembasahan kubah gambut Sebangau & Eks-PLG, siaga helikopter water bombing.
-                        {% elif p['provinsi'] == 'SUMSEL' %}
-                            Patroli darat koridor HTI OKI, penutupan sekat kanal Padang Sugihan.
-                        {% elif p['provinsi'] == 'JAMBI' %}
-                            Aktivasi pintu air sekat kanal TN Berbak, pengawasan trans-boundary Hutan Harapan.
-                        {% elif p['provinsi'] == 'KALTIM' %}
-                            Pembersihan sekat bakar batas inti IKN, monitoring areal mineral TN Kutai.
-                        {% else %}
-                            Pembersihan serasah savana TN Baluran & pencegahan kebakaran daun jati KPH Jatim.
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+# ==========================================
+# 8. INISIALISASI BEBAS TIMEOUT & OOM
+# ==========================================
+init_db()
 
-    <!-- TABEL PREDIKSI H-5 & KOORDINAT ACUAN -->
-    <div class="card" style="border-left: 5px solid #e11d48;">
-        <div class="card-header-title">
-            ⚠️ Detail Peringatan Dini Cuaca, 3 Elemen Pembakar & Keyakinan Hotspot 5 Hari ke Depan
-        </div>
-        <table>
-            <thead>
-                <tr>
-                    <th>No</th>
-                    <th>Provinsi</th>
-                    <th>Titik Sentinel / Kawasan Kritis</th>
-                    <th>Koordinat Acuan</th>
-                    <th>Tanggal Proyeksi</th>
-                    <th>Keyakinan Timbul Hotspot (%)</th>
-                    <th>Hari Tanpa Hujan (HTH)</th>
-                    <th>1. Suhu Puncak</th>
-                    <th>2. Ketersediaan Bahan Bakar</th>
-                    <th>3. Desikasi (RH / Angin)</th>
-                    <th>Tipe Lahan</th>
-                    <th>Tingkat Ancaman</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for f in forecasts %}
-                <tr>
-                    <td><b>{{ f['no'] }}</b></td>
-                    <td><span class="prov-tag prov-{{ f['provinsi']|lower }}">{{ f['provinsi'] }}</span></td>
-                    <td><b>{{ f['nama_kawasan'] }}</b></td>
-                    <td><code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-weight:bold;">{{ "%.4f"|format(f['latitude']) }}, {{ "%.4f"|format(f['longitude']) }}</code></td>
-                    <td>{{ f['forecast_date'] }}</td>
-                    <td>
-                        <span style="font-size:14px; font-weight:800; color:{% if f['confidence_pct'] >= 80 %}#dc2626{% elif f['confidence_pct'] >= 60 %}#d97706{% else %}#16a34a{% endif %};">
-                            {{ f['confidence_pct'] }}%
-                        </span>
-                        <div style="font-size:11px; color:#64748b;">{{ f['confidence_label'] }}</div>
-                    </td>
-                    <td><b>{{ f['dry_days_projected'] }} Hari Kering</b></td>
-                    <td><b>{{ f['temp_max'] }}°C</b></td>
-                    <td>
-                        {{ f['precip_sum'] }} mm 
-                        {% if f['precip_sum'] < 1.0 %}
-                            <span style="color:#dc2626; font-size:11px; font-weight:bold;">(Kering Ekstrim)</span>
-                        {% else %}
-                            <span style="color:#16a34a; font-size:11px;">(Lembap)</span>
-                        {% endif %}
-                    </td>
-                    <td>RH {{ f['rh_min'] }}% | {{ f['wind_max'] }} km/j</td>
-                    <td>{% if f['is_gambut'] == 1 %}<span style="color:#ea580c; font-weight:700;">Gambut</span>{% else %}Mineral{% endif %}</td>
-                    <td>
-                        {% if f['risk_category'] == 'Ekstrim' %}
-                            <span class="badge badge-ekstrim">🔥 EKSTRIM</span>
-                        {% elif f['risk_category'] == 'Tinggi' %}
-                            <span class="badge badge-tinggi">SIAGA TINGGI</span>
-                        {% elif f['risk_category'] == 'Sedang' %}
-                            <span class="badge badge-sedang">WASPADA</span>
-                        {% else %}
-                            <span class="badge badge-rendah">AMAN</span>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% endif %}
+def startup_tasks():
+    time.sleep(1)
+    seed_historical_multi()
+    update_fire_risk_forecast_multi()
 
-    <!-- TABEL RIWAYAT HOTSPOT 10 HARI -->
-    {% if current_view != 'FORECAST_ONLY' %}
-    <div class="card">
-        <div class="card-header-title">
-            🛰️ Matriks Riwayat Titik Hotspot Eksisting 10 Hari Terakhir (Multi-Satelit)
-        </div>
-        <table>
-            <thead>
-                <tr>
-                    <th>No</th>
-                    <th>Provinsi</th>
-                    <th>Koordinat</th>
-                    <th>Kabupaten</th>
-                    <th>Fungsi Kawasan</th>
-                    <th>Nama Kawasan / PBPH / Unit</th>
-                    <th>Gambut</th>
-                    <th>Sensor</th>
-                    {% for d in date_columns %}
-                        <th>{{ d }}</th>
-                    {% endfor %}
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in rows %}
-                <tr>
-                    <td>{{ row['No'] }}</td>
-                    <td><span class="prov-tag prov-{{ row['provinsi']|lower }}">{{ row['provinsi'] }}</span></td>
-                    <td><b>{{ "%.4f"|format(row['latitude']) }}, {{ "%.4f"|format(row['longitude']) }}</b></td>
-                    <td>{{ row['kabupaten'] }}</td>
-                    <td>{{ row['fungsi_kawasan'] }}</td>
-                    <td><b>{{ row['nama_kawasan'] }}</b></td>
-                    <td>{% if row['is_gambut_label'] == 'Ya' %}<span style="color:#ea580c; font-weight:700;">Gambut</span>{% else %}Mineral{% endif %}</td>
-                    <td>{{ row['sensor_terdeteksi'] }}</td>
-                    {% for d in date_columns %}
-                        <td>
-                            {% set st = row[d] %}
-                            {% if st == 'Tinggi' %}
-                                <span class="badge badge-tinggi">Tinggi</span>
-                            {% elif st == 'Sedang' %}
-                                <span class="badge badge-sedang">Sedang</span>
-                            {% elif st == 'Rendah' %}
-                                <span class="badge badge-rendah">Rendah</span>
-                            {% else %}
-                                <span class="badge badge-padam">Padam</span>
-                            {% endif %}
-                        </td>
-                    {% endfor %}
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% endif %}
+threading.Thread(target=startup_tasks, daemon=True).start()
+threading.Thread(target=run_scheduler, daemon=True).start()
 
-    <script>
-        function applyFilters() {
-            const prov = document.getElementById('provSelect').value;
-            const view = document.getElementById('viewModeSelect').value;
-            const source = document.getElementById('sourceSelect').value;
-            window.location.href = '/?prov=' + prov + '&view=' + view + '&source=' + source;
-        }
-
-        function refreshData() {
-            const btn = document.querySelector('.btn-refresh');
-            btn.innerHTML = '⏳ Menjalankan Sinkronisasi Latar Belakang...';
-            btn.disabled = true;
-            fetch('/api/sync')
-                .then(r => r.json())
-                .then(res => {
-                    btn.innerHTML = '⏳ Menarik Data Satelit & Cuaca (8 dtk)...';
-                    setTimeout(() => {
-                        alert('Data hotspot dan prediksi cuaca 5 provinsi berhasil disinkronkan!');
-                        window.location.reload();
-                    }, 8000);
-                })
-                .catch(e => {
-                    alert('Gagal menyinkronkan data.');
-                    btn.innerHTML = '🔄 Sinkronisasi Hotspot & Cuaca';
-                    btn.disabled = false;
-                });
-        }
-
-        const mapCenter = {{ map_center|tojson }};
-        const map = L.map('map').setView([mapCenter[0], mapCenter[1]], mapCenter[2]);
-
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 18,
-            attribution: '© OpenStreetMap contributors | Pemantauan Karhutla'
-        }).addTo(map);
-
-        const hotspotLayer = L.layerGroup();
-        const forecastLayer = L.layerGroup();
-
-        const hotspotData = {{ rows|tojson }};
-        const forecastData = {{ forecasts|tojson }};
-        const currentView = "{{ current_view }}";
-
-        hotspotData.forEach(pt => {
-            const st = pt.status_terakhir || 'Padam';
-            const isPadam = st === 'Padam';
-            const color = isPadam ? '#94a3b8' : (st === 'Tinggi' ? '#dc2626' : (st === 'Sedang' ? '#d97706' : '#16a34a'));
-            
-            const circle = L.circleMarker([pt.latitude, pt.longitude], {
-                radius: isPadam ? 5 : 8,
-                fillColor: color,
-                color: '#ffffff',
-                weight: 1.5,
-                opacity: 1,
-                fillOpacity: 0.9
-            });
-
-            circle.bindPopup(`
-                <div style="font-size:12px; min-width:210px;">
-                    <strong style="color:${color}; font-size:14px;">Hotspot Eksisting: ${st}</strong><br>
-                    <b>Kawasan:</b> ${pt.nama_kawasan}<br>
-                    <b>Koordinat:</b> ${Number(pt.latitude).toFixed(4)}, ${Number(pt.longitude).toFixed(4)}<br>
-                    <b>Kabupaten:</b> ${pt.kabupaten} (${pt.provinsi})<br>
-                    <b>Fungsi:</b> ${pt.fungsi_kawasan}<br>
-                    <b>Tipe Lahan:</b> ${pt.is_gambut_label === 'Ya' ? 'Rawa Gambut' : 'Tanah Mineral'}<br>
-                    <b>Sensor Satelit:</b> ${pt.sensor_terdeteksi}
-                </div>
-            `);
-            hotspotLayer.addLayer(circle);
-        });
-
-        const sentinelRendered = new Set();
-        forecastData.forEach(fc => {
-            const key = fc.latitude + '_' + fc.longitude;
-            if (!sentinelRendered.has(key)) {
-                sentinelRendered.add(key);
-                const isEkstrim = fc.risk_category === 'Ekstrim';
-                const pulseColor = isEkstrim ? '#dc2626' : '#ea580c';
-                
-                const marker = L.circleMarker([fc.latitude, fc.longitude], {
-                    radius: 13,
-                    fillColor: pulseColor,
-                    color: '#ffffff',
-                    weight: 2,
-                    dashArray: '4, 4',
-                    fillOpacity: 0.5
-                });
-
-                marker.bindPopup(`
-                    <div style="font-size:12px; min-width:245px;">
-                        <span style="background:${pulseColor}; color:white; padding:2px 8px; border-radius:4px; font-weight:bold;">
-                            🔥 Potensi H-5: ${fc.risk_category}
-                        </span><br>
-                        <div style="margin: 6px 0 2px 0;">
-                            <b>Keyakinan Hotspot:</b> <span style="font-size:14px; font-weight:bold; color:${pulseColor};">${fc.confidence_pct}%</span>
-                            <div style="font-size:11px; color:#64748b;">${fc.confidence_label}</div>
-                        </div>
-                        <b style="font-size:13px; display:inline-block; margin-top:4px;">${fc.nama_kawasan}</b><br>
-                        <span style="color:#0f172a; font-weight:bold; background:#f1f5f9; padding:1px 4px; border-radius:3px;">
-                            📍 ${Number(fc.latitude).toFixed(4)}, ${Number(fc.longitude).toFixed(4)}
-                        </span><br>
-                        <span style="color:#64748b;">${fc.provinsi} | ${fc.is_gambut === 1 ? 'Rawa Gambut' : 'Tanah Mineral'}</span>
-                        <hr style="border:0; border-top:1px solid #e2e8f0; margin:6px 0;">
-                        <b>Analisis 3 Elemen Pembakar:</b><br>
-                        🔥 <b>1. Suhu Puncak:</b> ${fc.temp_max}°C (${fc.temp_max >= 34 ? '<span style="color:red; font-weight:bold;">Kritis</span>' : 'Normal'})<br>
-                        🍂 <b>2. Bahan Bakar / HTH:</b> ${fc.dry_days_projected} Hari Kering (${fc.precip_sum} mm)<br>
-                        💨 <b>3. Desikasi (RH & Angin):</b> RH ${fc.rh_min}% | Angin ${fc.wind_max} km/j
-                    </div>
-                `);
-                forecastLayer.addLayer(marker);
-            }
-        });
-
-        if (currentView === 'ALL_LAYERS') {
-            hotspotLayer.addTo(map);
-            forecastLayer.addTo(map);
-        } else if (currentView === 'HOTSPOT_ONLY') {
-            hotspotLayer.addTo(map);
-        } else if (currentView === 'FORE
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
