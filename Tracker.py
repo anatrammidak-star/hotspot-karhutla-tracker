@@ -1205,20 +1205,25 @@ def download_excel():
     return "File Excel belum tersedia", 404
 
 # ==========================================
-# 8. INISIALISASI OTOMATIS (LOKAL & CLOUD)
+# 8. INISIALISASI OTOMATIS (CEPAT & BEBAS TIMEOUT)
 # ==========================================
 init_db()
-seed_historical_multi()
-update_fire_risk_forecast_multi()
 
-t = threading.Thread(target=run_scheduler, daemon=True)
-t.start()
+def startup_background_tasks():
+    # Beri jeda 2 detik agar Gunicorn selesai mengikat port web
+    time.sleep(2)
+    try:
+        seed_historical_multi()
+    except Exception as e:
+        print(f"Error seed: {e}")
+    try:
+        update_fire_risk_forecast_multi()
+    except Exception as e:
+        print(f"Error forecast: {e}")
 
-try:
-    initial_date, _ = get_effective_date_and_session()
-    export_to_excel_multi(initial_date.strftime("%Y-%m-%d"))
-except Exception:
-    pass
+# Jalankan semua proses unduh data di thread terpisah agar booting instan
+threading.Thread(target=startup_background_tasks, daemon=True).start()
+threading.Thread(target=run_scheduler, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
