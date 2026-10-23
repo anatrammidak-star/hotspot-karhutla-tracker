@@ -16,12 +16,13 @@ import requests
 DB_NAME = "hotspot_multi.db"
 DEFAULT_NASA_KEY = "cf5d1449942e6c851eba10358106ea6f"
 
-PROVINSI_BBOX = {
-    "JAMBI": "101.15,-2.50,104.55,-0.75",
-    "SUMSEL": "102.05,-4.95,106.15,-1.65",
-    "JATIM": "110.85,-8.80,114.65,-6.75",
-    "KALTENG": "110.75,-3.55,115.85,0.75",
-    "KALTIM": "113.80,-2.45,119.05,2.85",
+# Bounding Box Koordinat: (min_lon, min_lat, max_lon, max_lat)
+PROV_BOUNDS = {
+    "JAMBI": (101.15, -2.50, 104.55, -0.75),
+    "SUMSEL": (102.05, -4.95, 106.15, -1.65),
+    "JATIM": (110.85, -8.80, 114.65, -6.75),
+    "KALTENG": (110.75, -3.55, 115.85, 0.75),
+    "KALTIM": (113.80, -2.45, 119.05, 2.85),
 }
 
 SENTINEL_POINTS = [
@@ -184,11 +185,10 @@ def classify_point_fast(prov, lat, lon):
     return "Lainnya", "Area Terbuka", 0, "Kabupaten"
 
 # ==========================================
-# 3. PENARIKAN NASA FIRMS & CUACA H-5
+# 3. PENARIKAN NASA FIRMS & PREDIKSI CUACA
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
-    prov_keys = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"] if target_prov == "ALL" else [target_prov]
     combined = []
 
     sensors = [
@@ -198,48 +198,51 @@ def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
         ("MODIS_NRT", "Terra/Aqua"),
     ]
 
-    today_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
-    dates_to_try = [target_date_str, (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")]
+    for api_code, sat_lbl in sensors:
+        url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/2"
+        try:
+            resp = requests.get(url, timeout=14)
+            if resp.status_code == 200 and "latitude" in resp.text:
+                lines = resp.text.strip().split("\n")
+                if len(lines) > 1 and "latitude" in lines[0]:
+                    df = pd.read_csv(io.StringIO(resp.text))
+                    for _, r in df.iterrows():
+                        lat = float(r["latitude"])
+                        lon = float(r["longitude"])
 
-    for p in prov_keys:
-        bbox = PROVINSI_BBOX[p]
-        for api_code, sat_lbl in sensors:
-            for d_str in dates_to_try:
-                url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/1/{d_str}"
-                try:
-                    resp = requests.get(url, timeout=8)
-                    if resp.status_code == 200 and "latitude" in resp.text:
-                        lines = resp.text.strip().split("\n")
-                        if len(lines) > 1 and "latitude" in lines[0]:
-                            df = pd.read_csv(io.StringIO(resp.text))
-                            for _, r in df.iterrows():
-                                lat = float(r["latitude"])
-                                lon = float(r["longitude"])
+                        matched_p = None
+                        for p_name, bounds in PROV_BOUNDS.items():
+                            if bounds[0] <= lon <= bounds[2] and bounds[1] <= lat <= bounds[3]:
+                                matched_p = p_name
+                                break
 
-                                c_raw = str(r.get("confidence", "nominal")).strip().lower()
-                                if c_raw in ["h", "high"]:
-                                    conf_val = 90.0
-                                elif c_raw in ["l", "low"]:
-                                    conf_val = 25.0
-                                else:
-                                    try:
-                                        conf_val = float(c_raw)
-                                    except ValueError:
-                                        conf_val = 60.0
+                        if matched_p:
+                            if target_prov != "ALL" and matched_p != target_prov:
+                                continue
 
-                                acq_date = str(r.get("acq_date", d_str))
+                            c_raw = str(r.get("confidence", "nominal")).strip().lower()
+                            if c_raw in ["h", "high"]:
+                                conf_val = 90.0
+                            elif c_raw in ["l", "low"]:
+                                conf_val = 25.0
+                            else:
+                                try:
+                                    conf_val = float(c_raw)
+                                except ValueError:
+                                    conf_val = 60.0
 
-                                combined.append({
-                                    "provinsi": p,
-                                    "latitude": lat,
-                                    "longitude": lon,
-                                    "confidence": conf_val,
-                                    "satellite_source": sat_lbl,
-                                    "acq_date": acq_date,
-                                })
-                            break
-                except Exception:
-                    pass
+                            acq_date = str(r.get("acq_date", target_date_str))
+
+                            combined.append({
+                                "provinsi": matched_p,
+                                "latitude": lat,
+                                "longitude": lon,
+                                "confidence": conf_val,
+                                "satellite_source": sat_lbl,
+                                "acq_date": acq_date,
+                            })
+        except Exception:
+            pass
 
     return combined
 
@@ -370,7 +373,6 @@ def sync_hotspots_multi(target_date_str):
             dt = pt["acq_date"]
 
             status = "Tinggi" if conf >= 80 else ("Sedang" if conf >= 30 else "Rendah")
-            # Resolusi spasial cluster ID (~500 meter) agar multi-satelit terkonsolidasi pada 1 titik
             cid = f"HS-{prov}-{round(lat, 2)}-{round(lon, 2)}"
             fkws, nkws, is_g, kab = classify_point_fast(prov, lat, lon)
 
@@ -544,12 +546,12 @@ def generate_table_multi(
 
     summary_stats = {
         "total": 0, "total_db": 0, "tinggi": 0, "sedang": 0, "rendah": 0, "padam": 0, "aktif": 0,
-        "konservasi": 0, "gambut": 0, "ekstrim_fc": 0, "max_conf": 0, "is_capped": False
+        "konservasi": 0, "gambut": 0, "ekstrim_fc": 0, "max_conf": 0, "map_total": 0
     }
 
     if df_clusters.empty:
         conn.close()
-        return pd.DataFrame(), date_list, summary_stats
+        return pd.DataFrame(), pd.DataFrame(), date_list, summary_stats
 
     sat_cond = ""
     if filter_sat == "NOAA":
@@ -589,7 +591,6 @@ def generate_table_multi(
         )
         pivot = agg_logs.pivot(index="cluster_id", columns="log_date", values="status").fillna("Padam")
 
-        # Konsolidasi nama sensor yang mendeteksi pada klaster yang sama
         sat_summary = {}
         for cid, group in df_logs[df_logs["status"] != "Padam"].groupby("cluster_id"):
             all_sats = []
@@ -645,20 +646,19 @@ def generate_table_multi(
         summary_stats["konservasi"] = int(aktif_rows["fungsi_kawasan"].str.contains("KPA|KSA|Tahura", na=False).sum())
         summary_stats["gambut"] = int((aktif_rows["is_gambut"] == 1).sum())
 
-        # Urutkan berdasarkan status tertinggi dan keaktifan terkini
         rank_order = {"Tinggi": 3, "Sedang": 2, "Rendah": 1, "Padam": 0}
         merged["sort_rank"] = merged["status_terakhir"].map(rank_order)
         merged = merged.sort_values(by=["sort_rank", date_list[-1]], ascending=[False, False]).drop(columns=["sort_rank"])
 
-        # Pembatasan tampilan 300 titik prioritas agar peramban ringan
-        if len(merged) > 300:
-            summary_stats["is_capped"] = True
-            merged = merged.head(300)
-
         summary_stats["total"] = len(merged)
 
     merged.insert(0, "No", range(1, len(merged) + 1))
-    return merged, date_list, summary_stats
+    
+    # Ambil 300 titik teratas khusus untuk render visualisasi peta
+    map_df = merged.head(300)
+    summary_stats["map_total"] = len(map_df)
+
+    return merged, map_df, date_list, summary_stats
 
 def export_to_excel_multi(
     ref_date_str,
@@ -667,7 +667,7 @@ def export_to_excel_multi(
     filter_source="ALL_DATA",
 ):
     ref_d = datetime.strptime(ref_date_str, "%Y-%m-%d").date()
-    df, _, _ = generate_table_multi(
+    df, _, _, _ = generate_table_multi(
         ref_d,
         filter_prov=filter_prov,
         filter_sat=filter_sat,
@@ -697,7 +697,7 @@ def run_scheduler():
         time.sleep(25)
 
 # ==========================================
-# 7. FLASK APP & TEMPLATE LEAFLET CANVAS
+# 7. FLASK APP & TAMPILAN
 # ==========================================
 app = Flask(__name__)
 
@@ -745,7 +745,7 @@ HTML_PAGE = """<!DOCTYPE html>
         .stat-lbl { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #64748b; }
         .stat-ekstrim { background: #fff1f2; border-color: #fda4af; }
         .stat-ekstrim .stat-val { color: #e11d48; }
-        .info-cap-box { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; padding: 8px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 12px; font-weight: 600; display: inline-block; }
+        .info-cap-box { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -793,7 +793,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="summary-container">
         <div class="summary-grid">
             <div class="stat-card">
-                <span class="stat-lbl">Total Hotspot Aktif (Terdata)</span>
+                <span class="stat-lbl">Total Hotspot Aktif</span>
                 <span class="stat-val" style="color: #0284c7;">{{ stats['aktif'] }}</span>
             </div>
             <div class="stat-card" style="background:#fef2f2; border-color:#fecaca;">
@@ -822,9 +822,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="card">
         <div class="card-header-title">
             <span>🗺️ Visualisasi Spasial Sebaran Hotspot Prioritas & Titik Potensi Karhutla H-5</span>
-            {% if stats['is_capped'] %}
-                <span class="info-cap-box">⚡ Menampilkan 300 Titik Hotspot Prioritas Terkini (Gunakan Unduh Excel untuk data lengkap)</span>
-            {% endif %}
+            <span class="info-cap-box">⚡ Peta memvisualisasikan {{ stats['map_total'] }} titik hotspot prioritas teratas</span>
         </div>
         <div id="map"></div>
     </div>
@@ -937,10 +935,8 @@ HTML_PAGE = """<!DOCTYPE html>
     {% if current_view != 'FORECAST_ONLY' %}
     <div class="card">
         <div class="card-header-title">
-            <span>🛰️ Matriks Riwayat Titik Hotspot Eksisting (Multi-Sensor Terkonfirmasi)</span>
-            {% if stats['is_capped'] %}
-                <span class="info-cap-box">⚡ Ditampilkan 300 Titik Hotspot Prioritas Terkini (dari total {{ stats['total_db'] }} titik)</span>
-            {% endif %}
+            <span>🛰️ Seluruh Daftar Detail Riwayat Titik Hotspot Eksisting 10 Hari (Multi-Sensor Terkonfirmasi)</span>
+            <span style="font-size:12px; color:#64748b; font-weight:normal;">Total terdata di tabel: <b>{{ stats['total'] }} titik</b></span>
         </div>
         <table>
             <thead>
@@ -1029,11 +1025,11 @@ HTML_PAGE = """<!DOCTYPE html>
         const hotspotLayer = L.layerGroup();
         const forecastLayer = L.layerGroup();
 
-        const hotspotData = {{ rows|tojson }};
+        const hotspotMapData = {{ map_rows|tojson }};
         const forecastData = {{ forecasts|tojson }};
         const currentView = "{{ current_view }}";
 
-        hotspotData.forEach(pt => {
+        hotspotMapData.forEach(pt => {
             const st = pt.status_terakhir || 'Padam';
             const isPadam = st === 'Padam';
             const color = isPadam ? '#94a3b8' : (st === 'Tinggi' ? '#dc2626' : (st === 'Sedang' ? '#d97706' : '#16a34a'));
@@ -1119,14 +1115,15 @@ def index():
     ref_d, session_name = get_effective_date_and_session()
     ref_str = ref_d.strftime("%Y-%m-%d")
 
-    df, date_list, stats = generate_table_multi(
+    df_full, df_map, date_list, stats = generate_table_multi(
         ref_d,
         filter_prov=prov,
         filter_sat=sat,
         filter_status=status,
         filter_source=source,
     )
-    rows = df.to_dict(orient="records") if not df.empty else []
+    rows = df_full.to_dict(orient="records") if not df_full.empty else []
+    map_rows = df_map.to_dict(orient="records") if not df_map.empty else []
     forecasts = get_forecast_summary_multi(filter_prov=prov)
     prov_summary = get_provincial_potential_summary()
     map_center = PROV_CENTERS.get(prov, PROV_CENTERS["ALL"])
@@ -1134,6 +1131,7 @@ def index():
     return render_template_string(
         HTML_PAGE,
         rows=rows,
+        map_rows=map_rows,
         forecasts=forecasts,
         prov_summary=prov_summary,
         map_center=map_center,
@@ -1180,7 +1178,7 @@ def download_excel():
     return "File Excel belum tersedia", 404
 
 # ==========================================
-# 8. INISIALISASI BEBAS OOM & INSTANT BOOT
+# 8. INISIALISASI BEBAS TIMEOUT & OOM
 # ==========================================
 init_db()
 
