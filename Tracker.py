@@ -672,7 +672,7 @@ def run_scheduler():
         time.sleep(25)
 
 # ==========================================
-# 7. FLASK APP
+# 7. FLASK APP (MENGGUNAKAN TEMPLATE STANDAR)
 # ==========================================
 app = Flask(__name__)
 
