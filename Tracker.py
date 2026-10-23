@@ -294,58 +294,75 @@ def match_or_create_clusters_multi(conn, new_gdf, threshold_km=0.5):
 # ==========================================
 def fetch_satellite_data_multi(target_date_str, target_prov="ALL"):
     map_key = get_nasa_key()
-    prov_keys = ["JAMBI", "SUMSEL", "JATIM", "KALTENG", "KALTIM"] if target_prov == "ALL" else [target_prov]
     combined = []
 
-    satellite_sources = [
+    # Bounding Box Filter manual per provinsi (koordinat min_lon, min_lat, max_lon, max_lat)
+    PROV_BOUNDS = {
+        "JAMBI": (101.15, -2.50, 104.55, -0.75),
+        "SUMSEL": (102.05, -4.95, 106.15, -1.65),
+        "JATIM": (110.85, -8.80, 114.65, -6.75),
+        "KALTENG": (110.75, -3.55, 115.85, 0.75),
+        "KALTIM": (113.80, -2.45, 119.05, 2.85)
+    }
+
+    # Tarik data resmi Indonesia langsung (IDN) untuk sensor utama
+    sensors = [
         ("VIIRS_SNPP_NRT", "SNPP"),
-        ("NOAA_20_VIIRS_NRT", "NOAA-20"),
-        ("NOAA_21_VIIRS_NRT", "NOAA-21"),
-        ("MODIS_NRT", "Terra/Aqua"),
+        ("VIIRS_NOAA20_NRT", "NOAA-20"),
+        ("MODIS_NRT", "Terra/Aqua")
     ]
 
-    for p in prov_keys:
-        bbox = PROVINSI_BBOX[p]
-        for api_code, sat_lbl in satellite_sources:
-            url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{api_code}/{bbox}/2/{target_date_str}"
-            try:
-                resp = requests.get(url, timeout=12)
-                if resp.status_code == 200 and "latitude" in resp.text:
-                    df = pd.read_csv(io.StringIO(resp.text))
-                    if df.empty or "latitude" not in df.columns:
-                        continue
+    for api_code, sat_lbl in sensors:
+        # Menarik data 1-2 hari terakhir untuk seluruh Indonesia
+        url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{map_key}/{api_code}/IDN/1/{target_date_str}"
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200 and "latitude" in resp.text:
+                df = pd.read_csv(io.StringIO(resp.text))
+                if df.empty or "latitude" not in df.columns:
+                    continue
 
-                    for _, r in df.iterrows():
-                        conf_val = 50.0
-                        if "confidence" in r:
-                            c_raw = str(r["confidence"]).strip().lower()
-                            if c_raw in ["h", "high"]:
-                                conf_val = 90.0
-                            elif c_raw in ["n", "nominal"]:
+                for _, r in df.iterrows():
+                    lat = float(r["latitude"])
+                    lon = float(r["longitude"])
+
+                    # Cek apakah koordinat masuk ke dalam 5 provinsi target
+                    matched_prov = None
+                    for prov_name, bounds in PROV_BOUNDS.items():
+                        min_x, min_y, max_x, max_y = bounds
+                        if min_x <= lon <= max_x and min_y <= lat <= max_y:
+                            matched_prov = prov_name
+                            break
+
+                    if matched_prov:
+                        if target_prov != "ALL" and matched_prov != target_prov:
+                            continue
+
+                        # Parsing confidence
+                        c_raw = str(r.get("confidence", "nominal")).strip().lower()
+                        if c_raw in ["h", "high"]:
+                            conf_val = 90.0
+                        elif c_raw in ["l", "low"]:
+                            conf_val = 25.0
+                        else:
+                            try:
+                                conf_val = float(c_raw)
+                            except ValueError:
                                 conf_val = 60.0
-                            elif c_raw in ["l", "low"]:
-                                conf_val = 25.0
-                            else:
-                                try:
-                                    conf_val = float(c_raw)
-                                except ValueError:
-                                    conf_val = 50.0
-
-                        acq_date = str(r.get("acq_date", target_date_str))
 
                         combined.append({
-                            "provinsi": p,
-                            "latitude": float(r["latitude"]),
-                            "longitude": float(r["longitude"]),
+                            "provinsi": matched_prov,
+                            "latitude": lat,
+                            "longitude": lon,
                             "confidence": conf_val,
                             "satellite_source": sat_lbl,
-                            "acq_date": acq_date,
+                            "acq_date": str(r.get("acq_date", target_date_str))
                         })
-            except Exception:
-                pass
+        except Exception as e:
+            print(f"Gagal menarik sensor {sat_lbl}: {e}")
+            pass
 
     return combined
-
 def calculate_risk_and_save(conn, item, fc_date, tm, rm, pr, wn, dry_count):
     temp_score = min(max((tm - 28.0) * 8.0, 0), 40)
     rh_score = min(max((75.0 - rm) * 1.2, 0), 30)
